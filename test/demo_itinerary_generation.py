@@ -6,8 +6,9 @@ Shows how to generate day-by-day itineraries from trip preferences.
 import sys
 import json
 import asyncio
+import os
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'backend'))
 
 from services.itinerary_service import ItineraryService
 

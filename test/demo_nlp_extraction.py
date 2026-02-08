@@ -5,8 +5,9 @@ Shows how to extract trip preferences from natural language input.
 """
 import sys
 import json
+import os
 
-sys.path.insert(0, 'backend')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'backend'))
 
 from services.nlp_extraction_service import NLPExtractionService
 

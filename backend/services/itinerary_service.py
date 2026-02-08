@@ -18,6 +18,7 @@ import logging
 import asyncio
 import sys
 import os
+import re
 from datetime import datetime, date
 from typing import Dict, Any, List, Optional
 
@@ -25,6 +26,7 @@ from typing import Dict, Any, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from clients.gemini_client import GeminiClient, ExternalAPIError
+from clients.groq_client import GroqClient
 from models.itinerary import (
     Itinerary,
     ItineraryDay,
@@ -51,9 +53,11 @@ day-by-day itinerary timetables for ANY city worldwide.
 2. Ensure practical geography — activities should follow efficient routing
    from the starting area, minimising backtracking.
 3. Include realistic time slots with no overlapping events.
-4. When a list of AVAILABLE VENUES from the database is provided, you
-   MUST prefer those venues over invented ones. Only add venues not on
-   the list when no suitable match exists for an interest category.
+4. **CRITICAL: You MUST ONLY use venues from the AVAILABLE VENUES list
+   provided from the database. DO NOT invent, create, or suggest any
+   venues that are not explicitly listed in the database section.**
+   **If there are insufficient venues in the database to fill the itinerary,
+   reduce the number of activities per day rather than inventing venues.**
 
 ## Hard Constraints (MUST follow)
 - Every activity must have explicit start and end times (HH:MM, 24-hour).
@@ -108,6 +112,7 @@ The schema is:
             "cost": <number>,
             "duration_reason": "<why this duration for this pace>",
             "notes": "<brief description>",
+            "source_url": "<venue_url_from_database>",
             "from_database": <boolean>
           }
         ],
@@ -155,7 +160,7 @@ class ItineraryGenerationError(Exception):
 
 
 class ItineraryService:
-    """Generates day-by-day itinerary timetables via Gemini."""
+    """Generates day-by-day itinerary timetables via Groq (primary) or Gemini (fallback)."""
 
     def __init__(
         self,
@@ -169,9 +174,34 @@ class ItineraryService:
             venue_service: Reads venue data from the Airflow-managed DB.
                            Created automatically if omitted.
         """
-        self.gemini_client = gemini_client or GeminiClient()
+        # Try Groq first, fallback to Gemini
+        self.use_groq = False
+        self.use_gemini = False
+        
+        try:
+            if settings.GROQ_API_KEY:
+                self.groq_client = GroqClient()
+                self.use_groq = True
+                self.logger = logging.getLogger(__name__)
+                self.logger.info("ItineraryService: Using Groq as primary LLM")
+        except Exception as e:
+            self.logger = logging.getLogger(__name__)
+            self.logger.warning(f"ItineraryService: Groq unavailable ({e}), trying Gemini")
+        
+        if not self.use_groq:
+            try:
+                self.gemini_client = gemini_client or GeminiClient()
+                self.use_gemini = True
+                self.logger = logging.getLogger(__name__)
+                self.logger.info("ItineraryService: Using Gemini as LLM")
+            except Exception as e:
+                self.logger = logging.getLogger(__name__)
+                self.logger.error(f"ItineraryService: No LLM available! Groq and Gemini both failed.")
+                raise ValueError("No LLM available - both Groq and Gemini failed to initialize")
+        
         self.venue_service = venue_service or VenueService()
-        self.logger = logging.getLogger(__name__)
+        if not hasattr(self, 'logger'):
+            self.logger = logging.getLogger(__name__)
 
     # ------------------------------------------------------------------
     # Public API
@@ -221,28 +251,79 @@ class ItineraryService:
         # 2. Build prompt (now includes venue data)
         prompt = self._build_generation_prompt(validated, venues=venues)
 
-        # 3. Call Gemini
-        try:
-            response_text = await self.gemini_client.generate_content(
-                prompt=prompt,
-                system_instruction=GEMINI_ITINERARY_SYSTEM_INSTRUCTION,
-                temperature=settings.GEMINI_ITINERARY_TEMPERATURE,
-                max_tokens=settings.GEMINI_ITINERARY_MAX_TOKENS,
-                request_id=request_id,
-            )
-        except ExternalAPIError:
-            self.logger.error(
-                "Gemini API failed during itinerary generation",
-                extra={"request_id": request_id},
-                exc_info=True,
-            )
-            raise
+        # 3. Call LLM (Groq first, then Gemini)
+        response_text = None
+        llm_used = None
+        
+        if self.use_groq:
+            try:
+                self.logger.info(
+                    "Calling Groq API for itinerary generation",
+                    extra={"request_id": request_id},
+                )
+                loop = asyncio.get_event_loop()
+                response_text = await loop.run_in_executor(
+                    None,
+                    lambda: self.groq_client.generate_json_content(
+                        prompt=prompt,
+                        system_instruction=GEMINI_ITINERARY_SYSTEM_INSTRUCTION,
+                        temperature=settings.GROQ_TEMPERATURE,
+                        max_tokens=settings.GROQ_MAX_TOKENS,
+                    ),
+                )
+                llm_used = "Groq"
+                self.logger.info(
+                    "Groq API success for itinerary generation",
+                    extra={"request_id": request_id},
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Groq API failed, falling back to Gemini: {e}",
+                    extra={"request_id": request_id},
+                )
+                # Try Gemini as fallback
+                if not hasattr(self, 'gemini_client'):
+                    self.gemini_client = GeminiClient()
+                self.use_gemini = True
+        
+        if not response_text and self.use_gemini:
+            try:
+                self.logger.info(
+                    "Calling Gemini API for itinerary generation",
+                    extra={"request_id": request_id},
+                )
+                response_text = await self.gemini_client.generate_content(
+                    prompt=prompt,
+                    system_instruction=GEMINI_ITINERARY_SYSTEM_INSTRUCTION,
+                    temperature=settings.GEMINI_ITINERARY_TEMPERATURE,
+                    max_tokens=settings.GEMINI_ITINERARY_MAX_TOKENS,
+                    request_id=request_id,
+                )
+                llm_used = "Gemini"
+            except ExternalAPIError:
+                self.logger.error(
+                    "Gemini API failed during itinerary generation",
+                    extra={"request_id": request_id},
+                    exc_info=True,
+                )
+                raise
+        
+        if not response_text:
+            raise Exception("No LLM response received - both Groq and Gemini failed")
 
         # 4. Parse response JSON
-        itinerary_data = self._parse_gemini_response(response_text, request_id)
+        itinerary_data = self._parse_llm_response(response_text, request_id, llm_used or "Unknown")
 
         # 5. Map to dataclass
         itinerary = self._build_itinerary_object(itinerary_data, validated, request_id)
+
+        # 5b. Validate all activities are from database
+        db_validation = self._validate_database_only(itinerary, request_id)
+        if not db_validation["valid"]:
+            raise ItineraryGenerationError(
+                reason="Itinerary contains non-database venues",
+                constraints=db_validation,
+            )
 
         # 6. Feasibility check
         check = self._validate_feasibility(itinerary, validated, request_id)
@@ -361,11 +442,25 @@ class ItineraryService:
         venue_block = ""
         if venues:
             venue_block = (
-                "\n\n**Available Venues (from database — prefer these):**\n"
+                "\n\n**AVAILABLE VENUES (from database — USE ONLY THESE):**\n"
                 + VenueService.format_venues_for_prompt(venues)
-                + "\n\nIMPORTANT: Use venues from the list above whenever possible. "
-                "Set 'from_database': true for activities sourced from this list. "
-                "Only invent venues when no suitable match exists.\n"
+                + "\n\n🚨 **STRICT REQUIREMENT:** You MUST use ONLY the venues listed above. "
+                "DO NOT create, invent, or suggest any other venues not on this list. "
+                "ALL activities MUST have 'from_database': true. "
+                "When using a venue, include its URL in the 'source_url' field. "
+                "If you cannot fill the itinerary with these venues, reduce activities per day. "
+                "NEVER invent venues under any circumstances.\n"
+            )
+        else:
+            # If no venues available from DB, we should fail early
+            logger.warning(
+                "No venues available from database for city=%s, interests=%s",
+                prefs['city'],
+                prefs.get('interests', []),
+            )
+            venue_block = (
+                "\n\n⚠️ **WARNING:** No venues found in database for this city and interests. "
+                "Please ensure the database is seeded with venues for this destination.\n"
             )
 
         return (
@@ -404,13 +499,18 @@ class ItineraryService:
         thread pool to avoid blocking the FastAPI event loop.
         """
         try:
+            # Calculate daily budget from total budget and duration
+            total_budget = prefs.get("budget", 0)
+            duration = prefs.get("duration_days", 1)
+            daily_budget = total_budget / duration if duration > 0 else total_budget
+            
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 None,
                 lambda: self.venue_service.get_venues_for_itinerary(
                     city=prefs["city"],
                     interests=prefs["interests"],
-                    budget_per_day=prefs["daily_budget"],
+                    budget_per_day=daily_budget,
                 ),
             )
         except Exception:
@@ -424,30 +524,59 @@ class ItineraryService:
     # Response parsing
     # ------------------------------------------------------------------
 
-    def _parse_gemini_response(
-        self, text: str, request_id: str
+    def _parse_llm_response(
+        self, text: str, request_id: str, llm_name: str = "LLM"
     ) -> Dict[str, Any]:
-        """Extract and parse the JSON body from the Gemini response."""
+        """Extract and parse the JSON body from the LLM response (Groq or Gemini)."""
         cleaned = text.strip()
 
         # Strip markdown code fences if present
         if cleaned.startswith("```"):
+            # Try to find JSON block
+            if "```json" in cleaned:
+                start = cleaned.find("```json") + 7
+                end = cleaned.find("```", start)
+                if end > start:
+                    cleaned = cleaned[start:end].strip()
+            elif "```" in cleaned:
+                start = cleaned.find("```") + 3
+                end = cleaned.find("```", start)
+                if end > start:
+                    cleaned = cleaned[start:end].strip()
+        
+        # Try to extract just the JSON object
+        if not cleaned.startswith("{"):
             start = cleaned.find("{")
+            if start != -1:
+                cleaned = cleaned[start:]
+        
+        if not cleaned.endswith("}"):
             end = cleaned.rfind("}") + 1
-            if start != -1 and end > start:
-                cleaned = cleaned[start:end]
+            if end > 0:
+                cleaned = cleaned[:end]
 
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            self.logger.error(
-                "Failed to parse Gemini JSON",
-                extra={"request_id": request_id, "error": str(exc), "preview": cleaned[:500]},
-            )
-            raise ItineraryGenerationError(
-                reason=f"Invalid JSON from Gemini: {exc}",
-                constraints={"raw_preview": cleaned[:1000]},
-            )
+            # Try one more time with a more aggressive clean
+            try:
+                # Remove any trailing commas before closing braces/brackets
+                import re
+                fixed = re.sub(r',(\s*[}\]])', r'\1', cleaned)
+                data = json.loads(fixed)
+                self.logger.warning(
+                    f"Fixed malformed JSON from {llm_name} (trailing commas)",
+                    extra={"request_id": request_id, "llm": llm_name},
+                )
+            except json.JSONDecodeError:
+                self.logger.error(
+                    f"Failed to parse {llm_name} JSON",
+                    extra={"request_id": request_id, "llm": llm_name, "error": str(exc), "preview": cleaned[:500]},
+                )
+                raise ItineraryGenerationError(
+                    reason=f"Invalid JSON from {llm_name}: {exc}",
+                    constraints={"raw_preview": cleaned[:1000], "llm_used": llm_name},
+                )
 
         # Normalise wrapper key
         if "itinerary" not in data and "days" in data:
@@ -485,6 +614,7 @@ class ItineraryService:
                         notes=a.get("notes"),
                         duration_reason=a.get("duration_reason"),
                         estimated_cost=float(a.get("cost", 0)),
+                        source_url=a.get("source_url"),
                         from_database=bool(a.get("from_database", False)),
                     )
                 )
@@ -622,6 +752,69 @@ class ItineraryService:
             extra={"request_id": request_id, "issues": len(issues), "warnings": len(warnings)},
         )
         return result
+
+    def _validate_database_only(
+        self,
+        itinerary: Itinerary,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Validate that ALL activities are from the database (from_database=True).
+        
+        This ensures the AI didn't invent any venues and only used venues
+        from the Airflow PostgreSQL database.
+        
+        Returns:
+            Dict with 'valid' boolean and lists of issues/warnings
+        """
+        issues: List[str] = []
+        warnings: List[str] = []
+        
+        total_activities = 0
+        db_activities = 0
+        non_db_venues = []
+        
+        for day in itinerary.days:
+            for activity in day.activities:
+                total_activities += 1
+                if activity.from_database:
+                    db_activities += 1
+                else:
+                    non_db_venues.append(
+                        f"Day {day.day_number}: {activity.venue_name}"
+                    )
+                    issues.append(
+                        f"Day {day.day_number}: Activity '{activity.venue_name}' "
+                        f"is not from database (from_database=False)"
+                    )
+        
+        # Calculate coverage
+        if total_activities > 0:
+            coverage = (db_activities / total_activities) * 100
+            
+            if coverage < 100:
+                self.logger.warning(
+                    "Itinerary contains AI-generated venues (not from database)",
+                    extra={
+                        "request_id": request_id,
+                        "total_activities": total_activities,
+                        "db_activities": db_activities,
+                        "coverage_percent": coverage,
+                        "non_db_venues": non_db_venues,
+                    }
+                )
+        
+        return {
+            "valid": len(issues) == 0,
+            "feasible": len(issues) == 0,
+            "total_activities": total_activities,
+            "database_activities": db_activities,
+            "non_database_activities": len(non_db_venues),
+            "coverage_percent": (db_activities / total_activities * 100) if total_activities > 0 else 0,
+            "non_database_venues": non_db_venues,
+            "issues": issues,
+            "warnings": warnings,
+        }
 
 
 # ---------------------------------------------------------------------------

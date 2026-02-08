@@ -74,6 +74,62 @@ class GroqClient:
         except Exception as e:
             raise Exception(f"Groq API request failed: {str(e)}")
 
+    def generate_json_content(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 8192,
+    ) -> str:
+        """
+        Generate JSON content using Groq API with JSON mode enforcement.
+        Similar to generate_content but forces JSON output format.
+
+        Args:
+            prompt: The user prompt/question
+            system_instruction: Optional system instruction for behavior control
+            temperature: Controls randomness (0.0-2.0)
+            max_tokens: Maximum tokens in response
+
+        Returns:
+            Generated JSON text content (as string, not parsed)
+        """
+        messages = []
+
+        # Build system instruction with JSON requirement
+        json_system = "You must respond with valid JSON only. Do not include any explanatory text, markdown formatting, or code blocks. Return only the raw JSON object."
+        if system_instruction:
+            full_system = f"{system_instruction}\n\n{json_system}"
+        else:
+            full_system = json_system
+
+        # Add system instruction
+        messages.append({
+            "role": "system",
+            "content": full_system
+        })
+
+        # Add user prompt
+        messages.append({
+            "role": "user",
+            "content": prompt
+        })
+
+        try:
+            # Call Groq API with JSON mode
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"}  # Force JSON output
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            raise Exception(f"Groq API request failed: {str(e)}")
+
     def generate_json(
         self,
         prompt: str,

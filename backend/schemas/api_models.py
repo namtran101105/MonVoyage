@@ -158,6 +158,39 @@ class ChatRequest(BaseModel):
     )
 
 
+class BudgetSummary(BaseModel):
+    """Budget estimation summary returned with itinerary."""
+
+    within_budget: bool = Field(
+        description="Whether the estimated costs fit within the user's stated budget.",
+    )
+    cheapest_total: Optional[float] = Field(
+        None, description="Lowest estimated total cost (CAD).",
+    )
+    average_total: Optional[float] = Field(
+        None, description="Average estimated total cost (CAD).",
+    )
+    remaining_budget: Optional[float] = Field(
+        None, description="Budget remaining after cheapest estimate (CAD).",
+    )
+    links: Optional[Dict[str, Optional[str]]] = Field(
+        None,
+        description="Booking links (airbnb, skyscanner, etc.).",
+    )
+
+
+class RouteLeg(BaseModel):
+    """Single route leg between two venues."""
+
+    leg: int = Field(description="Leg number (1-indexed).")
+    origin: str = Field(description="Origin venue/address.")
+    destination: str = Field(description="Destination venue/address.")
+    duration: Optional[str] = Field(None, description='Travel time, e.g. "18 mins".')
+    distance: Optional[str] = Field(None, description='Distance, e.g. "4.2 km".')
+    mode: Optional[str] = Field(None, description="Transit mode used.")
+    google_maps_link: Optional[str] = Field(None, description="Link to Google Maps directions.")
+
+
 class ChatResponse(BaseModel):
     """POST /api/chat response."""
 
@@ -179,3 +212,26 @@ class ChatResponse(BaseModel):
         description="Fields still missing during intake (null after itinerary).",
     )
     error: Optional[str] = None
+
+    # ── Enrichment fields (populated only in itinerary phase) ──
+    weather_summary: Optional[str] = Field(
+        None,
+        description=(
+            "Human-readable weather summary for the trip dates. "
+            "Null if weather data unavailable."
+        ),
+    )
+    budget_summary: Optional[BudgetSummary] = Field(
+        None,
+        description=(
+            "Budget estimation with cost breakdown and booking links. "
+            "Null if budget estimation unavailable."
+        ),
+    )
+    route_data: Optional[List[RouteLeg]] = Field(
+        None,
+        description=(
+            "Route legs between itinerary venues with travel times and Google Maps links. "
+            "Null if route data unavailable."
+        ),
+    )

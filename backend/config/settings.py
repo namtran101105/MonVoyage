@@ -53,8 +53,11 @@ class Settings:
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     GROQ_TEMPERATURE: float = float(os.getenv("GROQ_TEMPERATURE", "0.2"))
-    GROQ_MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "2048"))
+    GROQ_MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "8192"))  # Increased for large itinerary JSON
     GROQ_TIMEOUT: int = int(os.getenv("GROQ_TIMEOUT", "30"))
+
+    # ===== Google Maps API Configuration =====
+    GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
     # ===== Airflow / Venue Database =====
     APP_DB_URL: str = os.getenv(

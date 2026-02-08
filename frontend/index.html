@@ -303,10 +303,63 @@
         function updateRightPanel(data) {
             if (data.phase === 'itinerary') {
                 rightTitle.textContent = 'Your Itinerary';
-                resultsDiv.innerHTML =
-                    '<div class="info-card"><div class="itinerary-view">' +
-                    formatItinerary(data.assistant_message) +
-                    '</div></div>';
+                let html = '';
+
+                // Weather summary card
+                if (data.weather_summary) {
+                    html += '<div class="info-card"><h3>Weather Forecast</h3>';
+                    html += '<div style="font-size:13px;line-height:1.8;color:#555;">';
+                    data.weather_summary.split(' | ').forEach(day => {
+                        html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;">' + day + '</div>';
+                    });
+                    html += '</div></div>';
+                }
+
+                // Budget summary card
+                if (data.budget_summary) {
+                    const b = data.budget_summary;
+                    html += '<div class="info-card"><h3>Budget Estimate</h3><ul>';
+                    html += '<li><span class="badge ' + (b.within_budget ? 'done' : 'missing') + '">'
+                        + (b.within_budget ? '&#10003; Within budget' : '&#9888; Over budget') + '</span></li>';
+                    if (b.cheapest_total != null)
+                        html += '<li>Cheapest estimate: <strong>$' + b.cheapest_total.toFixed(0) + ' CAD</strong></li>';
+                    if (b.average_total != null)
+                        html += '<li>Average estimate: <strong>$' + b.average_total.toFixed(0) + ' CAD</strong></li>';
+                    if (b.remaining_budget != null)
+                        html += '<li>Budget remaining: <strong>$' + b.remaining_budget.toFixed(0) + ' CAD</strong></li>';
+                    if (b.links) {
+                        html += '<li style="padding-top:8px;font-size:12px;">';
+                        if (b.links.airbnb)
+                            html += '<a href="' + b.links.airbnb + '" target="_blank" style="color:#667eea;">Airbnb</a> ';
+                        if (b.links.skyscanner)
+                            html += '<a href="' + b.links.skyscanner + '" target="_blank" style="color:#667eea;">Skyscanner</a>';
+                        html += '</li>';
+                    }
+                    html += '</ul></div>';
+                }
+
+                // Itinerary card
+                html += '<div class="info-card"><h3>Day-by-Day Plan</h3>'
+                    + '<div class="itinerary-view">'
+                    + formatItinerary(data.assistant_message)
+                    + '</div></div>';
+
+                // Route data card
+                if (data.route_data && data.route_data.length > 0) {
+                    html += '<div class="info-card"><h3>Getting Around</h3><ul>';
+                    data.route_data.forEach(leg => {
+                        html += '<li>';
+                        html += '<strong>' + leg.origin + '</strong> &rarr; <strong>' + leg.destination + '</strong>';
+                        if (leg.duration) html += ' &mdash; ' + leg.duration;
+                        if (leg.distance) html += ' (' + leg.distance + ')';
+                        if (leg.google_maps_link)
+                            html += ' <a href="' + leg.google_maps_link + '" target="_blank" style="color:#667eea;font-size:12px;">Map</a>';
+                        html += '</li>';
+                    });
+                    html += '</ul></div>';
+                }
+
+                resultsDiv.innerHTML = html;
             } else {
                 rightTitle.textContent = 'Trip Status';
                 const needs = data.still_need || [];

@@ -348,11 +348,14 @@ class VenueService:
             addr = v.get("address") or ""
             hours = v.get("hours") or ""
             desc = (v.get("description") or "")[:200]
+            source_url = v.get("source_url") or ""
             line = f"- **{name}** [{cat}] — {addr}"
             if hours:
                 line += f" | Hours: {hours}"
             if desc:
                 line += f" | {desc}"
+            if source_url:
+                line += f" | URL: {source_url}"
             lines.append(line)
         return "\n".join(lines)
 

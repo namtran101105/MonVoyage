@@ -2,46 +2,59 @@
 
 ## Project Overview
 
-MonVoyage is a real-time, AI-powered itinerary engine that generates feasible travel itineraries for **any city** (currently defaulting to Toronto, Canada). This is an MVP being built for a 2-week hackathon demonstration.
+MonVoyage is a real-time, AI-powered itinerary engine that generates feasible travel itineraries. The current MVP is a **conversational Toronto trip planner** with a chat-based UI. This is an MVP being built for a 2-week hackathon demonstration.
 
-**Current Status**: Phase 2 Complete (FastAPI migration + Itinerary Generation + Airflow DB Integration)
+**Current Status**: Phase 2.5+ — Conversational Toronto MVP with Enriched Itineraries
 **Team Size**: 3 developers
 **Timeline**: 14 days
-**Default City**: Toronto (configurable via `DEFAULT_CITY` env var)
+**Default City**: Toronto (hardcoded in chat flow; configurable via `DEFAULT_CITY` env var for legacy endpoints)
+
+### Two Parallel Systems
+
+1. **Conversational Chat** (primary, used by frontend): Single `/api/chat` endpoint with multi-turn conversation flow. Uses Groq (primary) / Gemini (fallback). Toronto-only. Produces grounded itineraries with `Source:` citations.
+2. **Legacy Extraction** (still functional): `/api/extract` → `/api/refine` → `/api/generate-itinerary`. Uses Gemini (primary) / Groq (fallback). Supports any city.
 
 ## Project Goals
 
 Build a working prototype that demonstrates:
 1. AI-powered itinerary generation from natural language user input
-2. Real-time travel planning with multi-modal transportation
-3. Dynamic budget tracking and schedule adaptation
-4. Weather-aware activity recommendations
-5. Automated venue data collection via Apache Airflow web scraping pipeline with change detection
-6. Multi-city support (any city, not limited to a single destination)
+2. Conversational multi-turn trip planning via chat interface
+3. Grounded itineraries using only verified venue data (closed-world constraint)
+4. Source citations on every activity for transparency and trust
+5. Weather-aware activity recommendations
+6. Automated venue data collection via Apache Airflow web scraping pipeline with change detection
+7. Budget estimation with real Airbnb pricing and flight estimates
 
 ## Architecture Overview
 
 ### End-to-End Data Flow
 
+#### Conversational Chat Flow (Primary — used by frontend)
+
 ```
-User Input (natural language)
-  |
+Browser (index.html)
+  |  POST /api/chat  {messages: [...], user_input: "..."}
   v
-NLPExtractionService (Gemini/Groq)       ← async, native await
-  |  Extracts: city, dates, budget, interests, pace, etc.
-  v
-TripPreferences (validated)
+ConversationService.turn()
   |
-  +------> ItineraryService.generate_itinerary()    ← async
+  |  Phase 1: greeting  → hardcoded welcome (no LLM call)
+  |  Phase 2: intake    → Groq/Gemini multi-turn chat
+  |                        collects: dates, budget, interests, pace
+  |                        appends "Still need: ..." to each response
+  |  Phase 3: confirmed → user says "yes" to confirmation question
+  |  Phase 4: itinerary → ItineraryOrchestrator.generate_enriched_itinerary()
   |            |
-  |            |  1. Validates preferences
-  |            |  2. Queries Airflow DB for real venues (VenueService)  ← async via run_in_executor
-  |            |  3. Builds Gemini prompt WITH venue data
-  |            |  4. Calls Gemini API (async await)
-  |            |  5. Parses response -> Itinerary dataclass
-  |            |  6. Validates feasibility
+  |            |  State C: Extract TripPreferences from conversation (regex-based)
+  |            |  State D: Parallel enrichment + LLM generation
+  |            |    1. asyncio.gather: WeatherService + BudgetService + VenueService
+  |            |    2. Build prompt (venues + weather context) → Groq/Gemini LLM
+  |            |    3. GoogleMapsService.get_itinerary_routes() (post-LLM)
+  |            |  State E: Assemble response (itinerary + weather + budget + routes)
+  |            |
+  |            |  Fail-soft: weather/budget/routes → null on failure
+  |            |  Fatal: LLM failure → 500 error
   |            v
-  |        Itinerary (day-by-day timetable)
+  |        Enriched itinerary (Day N + Source citations + weather + budget + routes)
   |
   +--- Airflow DB (PostgreSQL) <--- Airflow DAGs (daily scraping)
            |                             |
@@ -55,16 +68,53 @@ TripPreferences (validated)
        (FastAPI reads)               (RAG retrieval)
 ```
 
+#### Legacy Extraction Flow (still functional)
+
+```
+User Input (natural language)
+  |
+  v
+NLPExtractionService (Gemini/Groq)       ← async, native await
+  |  Extracts: city, dates, budget, interests, pace, etc.
+  v
+TripPreferences (validated)
+  |
+  +------> ItineraryService.generate_itinerary()    ← async
+  |            |
+  |            |  1. Validates preferences (10 required fields)
+  |            |  2. Queries Airflow DB for real venues (VenueService)
+  |            |  3. Builds Gemini prompt WITH venue data
+  |            |  4. Calls Gemini API (async await)
+  |            |  5. Parses response -> Itinerary dataclass
+  |            |  6. Validates feasibility + database-only constraint
+  |            v
+  |        Itinerary (day-by-day timetable with from_database flags)
+```
+
 ### Component Layers
 
 **Backend** (FastAPI REST API):
-- `app.py` - FastAPI application with lifespan management, CORS, 5 endpoints
+- `app.py` - FastAPI application with lifespan management, CORS, 6 endpoints
 - `schemas/` - Pydantic request/response models (API boundary validation)
 - `services/` - Business logic:
+  - `conversation_service.py` - Multi-turn chat lifecycle (greeting → intake → confirmed → itinerary)
+  - `itinerary_orchestrator.py` - Orchestrates venue fetch, weather, budget, LLM itinerary, and routes ✅ NEW
   - `nlp_extraction_service.py` - NLP extraction from user input (async)
   - `itinerary_service.py` - Itinerary generation via Gemini + venue DB data (async)
-  - `venue_service.py` - Reads venue data from Airflow-managed PostgreSQL
-- `clients/` - External API wrappers (Gemini, Groq)
+  - `venue_service.py` - Reads venue data from Airflow PostgreSQL + Toronto fallback venues
+  - `weather_service.py` - Weather forecasts via WeatherClient
+  - `booking_service.py` - Accommodation + transportation booking orchestration
+  - `trip_budget_service.py` - Trip cost estimation from preferences
+  - `budget_estimator.py` - Core budget calculation (Airbnb scraping + flight estimates)
+  - `google_maps_service.py` - Route planning and directions via Google Maps API
+- `clients/` - External API wrappers:
+  - `gemini_client.py` - Gemini API (async with retry, + sync `chat_with_history`)
+  - `groq_client.py` - Groq API (sync: `generate_content`, `generate_json`, `chat_with_history`)
+  - `weather_client.py` - Weather forecast API ✅ NEW
+  - `airbnb_client.py` - Airbnb price scraping ✅ NEW
+  - `flight_client.py` - Flight price estimation ✅ NEW
+  - `busbud_client.py` - Bus/train booking links ✅ NEW
+  - `google_maps_client.py` - Google Maps Directions API ✅ NEW
 - `models/` - Data structures (TripPreferences, Itinerary)
 - `config/` - Configuration management (settings.py)
 - `utils/` - Helper functions
@@ -75,11 +125,14 @@ TripPreferences (validated)
 - `airflow/dags/lib/monitor.py` - HTML fetching + structured data extraction
 - `airflow/dags/lib/chroma_index.py` - Chroma vector DB integration
 - `airflow/dags/lib/retrieval.py` - RAG retrieval logic
-- `airflow/dags/lib/seed_tracked_sites.py` - Database seeding
+- `airflow/dags/lib/seed_tracked_sites.py` - Database seeding (27 Toronto venues)
 
 **Frontend**: Single-page HTML/CSS/JS chatbot interface
-- Split-panel design: Chat interface | Extracted preferences display
-- Real-time preference extraction and validation
+- Toronto Trip Planner branding
+- Split-panel design: Chat interface | Phase-aware right panel
+- Calls `/api/chat` endpoint exclusively (stateless server, client-side message history)
+- Right panel shows: "What I know so far" during intake → enriched itinerary after generation
+- Enrichment cards in right panel: Weather Forecast, Budget Estimate (with booking links), Day-by-Day Plan, Getting Around (route legs with Google Maps links)
 
 **Database**: PostgreSQL (shared between Airflow and FastAPI)
 
@@ -88,12 +141,15 @@ TripPreferences (validated)
 ### Core Technologies
 - **Backend Framework**: FastAPI with uvicorn (migrated from Flask in Phase 2)
 - **API Validation**: Pydantic v2 request/response schemas
-- **AI/NLP**: Gemini API (primary, via google-genai SDK) / Groq API (fallback, llama-3.3-70b-versatile model)
+- **AI/NLP**:
+  - **Chat flow**: Groq API (primary, llama-3.3-70b-versatile) / Gemini API (fallback)
+  - **Legacy extraction**: Gemini API (primary, gemini-3-flash-preview) / Groq API (fallback)
+  - Both clients support `chat_with_history()` for multi-turn conversations
 - **Language**: Python 3.8+
 - **Database**: PostgreSQL (shared by Airflow and FastAPI via SQLAlchemy)
 - **Vector DB**: Chroma (for RAG venue retrieval)
 - **Orchestration**: Apache Airflow (web scraping + change detection)
-- **APIs**: Google Maps API (planned), Weather API (planned)
+- **APIs**: Google Maps API (implemented), Weather API (implemented), Airbnb scraping (implemented)
 
 ### Dependencies
 ```
@@ -214,7 +270,18 @@ INTEREST_TO_DB_CATEGORIES = {
 
 ### Graceful Degradation
 
-If the Airflow DB is unreachable, `ItineraryService` still works — it generates the itinerary without real venue data (Gemini uses its own knowledge). The `_fetch_venues()` method catches exceptions and returns an empty list.
+| Scenario | Behavior |
+|----------|----------|
+| PostgreSQL unreachable | `VenueService` uses `TORONTO_FALLBACK_VENUES` (15 built-in venues) for chat flow; returns empty list for legacy flow (Gemini uses its own knowledge) |
+| `GROQ_API_KEY` not set | Chat endpoint falls back to Gemini; if Gemini also fails, returns 503 |
+| `GEMINI_KEY` not set | Chat endpoint uses Groq only; legacy endpoints (`/api/extract`, `/api/refine`, `/api/generate-itinerary`) return 500 |
+| Both LLM keys missing | Server refuses to start with configuration error |
+| Groq API call fails | `ConversationService` falls back to Gemini mid-conversation |
+| Google Maps API unavailable | `route_data` is `null` in response; itinerary still generated |
+| Weather API unavailable | `weather_summary` is `null` in response; itinerary still generated (no weather context in prompt) |
+| Budget estimation fails | `budget_summary` is `null` in response; itinerary still generated |
+| All enrichment services fail | Core itinerary generated with venues only; all enrichment fields `null` |
+| Orchestrator fails entirely | Falls back to legacy venue-only itinerary generation path |
 
 ## API Endpoints
 
@@ -222,20 +289,55 @@ Auto-generated API documentation is available at:
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
 
+### Conversational Chat (Primary — used by frontend)
+```
+POST /api/chat
+Request: {
+  "messages": [                         // Full conversation history (client-side state)
+    {"role": "system", "content": "..."},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "..."}
+  ],
+  "user_input": "I want to visit March 15-17..."   // Latest user message (null for greeting)
+}
+Response: {
+  "success": boolean,
+  "messages": ChatMessage[],            // Updated conversation history (send back next turn)
+  "assistant_message": string,          // Latest assistant response
+  "phase": string,                      // "greeting" | "intake" | "confirmed" | "itinerary"
+  "still_need": string[] | null,        // e.g., ["budget", "interests"] or null
+  "error": string | null,
+  // ── Enrichment fields (populated only in itinerary phase) ──
+  "weather_summary": string | null,     // Human-readable weather for trip dates
+  "budget_summary": {                   // null if budget estimation unavailable
+    "within_budget": boolean,
+    "cheapest_total": float | null,
+    "average_total": float | null,
+    "remaining_budget": float | null,
+    "links": { "airbnb": string | null, ... } | null
+  } | null,
+  "route_data": [                       // null if Google Maps unavailable
+    { "leg": int, "origin": string, "destination": string,
+      "duration": string | null, "distance": string | null,
+      "mode": string | null, "google_maps_link": string | null }
+  ] | null
+}
+```
+
 ### Health Check
 ```
 GET /api/health
 Response: {
   "status": "healthy",
   "service": "MonVoyage Trip Planner",
-  "primary_llm": "gemini",
-  "model": "Gemini (gemini-3-flash-preview)",
+  "primary_llm": "gemini" | "groq",
+  "model": string,
   "nlp_service_ready": boolean,
   "error": string | null
 }
 ```
 
-### Extract Preferences (Initial)
+### Extract Preferences (Legacy)
 ```
 POST /api/extract
 Request: {
@@ -255,7 +357,7 @@ Response: {
 }
 ```
 
-### Refine Preferences (Follow-up)
+### Refine Preferences (Legacy)
 ```
 POST /api/refine
 Request: {
@@ -271,7 +373,7 @@ Response: {
 }
 ```
 
-### Generate Itinerary
+### Generate Itinerary (Legacy)
 ```
 POST /api/generate-itinerary
 Request: {
@@ -288,7 +390,74 @@ Response: {
 }
 ```
 
-## Itinerary Generation Flow
+## Conversational Chat Flow (Toronto MVP)
+
+### Overview
+
+The `/api/chat` endpoint powers a stateless, multi-turn conversation for planning Toronto trips. The server holds no session state — the full message history is stored client-side and sent with every request.
+
+### Phases
+
+```
+greeting  →  intake  →  confirmed  →  itinerary
+```
+
+| Phase | Trigger | LLM Call | Output |
+|-------|---------|----------|--------|
+| `greeting` | Empty `messages` array | None (hardcoded) | Welcome message + `Still need: travel dates, budget, interests, pace` |
+| `intake` | User provides trip details | Groq/Gemini with `INTAKE_SYSTEM_PROMPT` | Acknowledge + ask for missing info + `Still need: ...` |
+| `confirmed` | All 4 fields collected | Groq/Gemini detects completion | "Want me to generate your Toronto itinerary now?" |
+| `itinerary` | User confirms ("yes", "sure", etc.) | Groq/Gemini with `ITINERARY_SYSTEM_PROMPT` | Day-by-day plan with Source citations |
+
+### Required Intake Fields (4)
+
+| Field | Example |
+|-------|---------|
+| Travel dates | March 15-17, 2026 |
+| Budget | $300 CAD total |
+| Interests | Museums, food, parks |
+| Pace | Relaxed / Moderate / Packed |
+
+### Confirmation Detection
+
+The system detects confirmation via two conditions (both must be true):
+1. The previous assistant message contains the marker: `"generate your Toronto itinerary"`
+2. The user's input matches an affirmative pattern: `yes`, `yeah`, `sure`, `go ahead`, `let's do it`, `absolutely`, `ok`, `sounds good`, `yes please`, etc.
+
+If only condition 2 is true (user says "yes" but no confirmation was asked), the conversation stays in intake phase.
+
+### Grounded Itinerary Generation
+
+When confirmed, `ConversationService` generates the itinerary:
+
+1. Fetches Toronto venues via `VenueService.get_toronto_venues()` (DB or fallback)
+2. Formats venues via `VenueService.format_venues_for_chat()`:
+   ```
+   [venue_id: cn_tower] CN Tower [tourism] — 290 Bremner Blvd, Toronto | URL: https://www.cntower.ca
+   ```
+3. Builds the itinerary system prompt with the venue catalogue injected
+4. Calls Groq (primary) or Gemini (fallback) with the full conversation context
+5. Returns a day-by-day plan in this exact format:
+
+```
+Day 1
+Morning: Visit the Royal Ontario Museum — Royal Ontario Museum (Source: rom, https://www.rom.on.ca)
+Afternoon: Lunch at St. Lawrence Market — St. Lawrence Market (Source: st_lawrence_market, https://www.stlawrencemarket.com)
+Evening: Explore the Distillery District — Distillery Historic District (Source: distillery_district, https://www.thedistillerydistrict.com)
+```
+
+### QA Constraints
+
+- **Still need**: Every intake response ends with `Still need: <comma-separated list>`
+- **100% Source coverage**: Every Morning/Afternoon/Evening line must have `Source: {venue_id}, {url}`
+- **Closed-world**: ONLY venues from the venue list may be used; invented venues are rejected
+- **Negative rejection**: If user asks for a venue not in the list, the assistant refuses and offers alternatives
+
+### LLM Fallback in Chat
+
+`ConversationService.__init__()` tries Groq first. If unavailable, falls back to Gemini. If a Groq call fails mid-conversation, the service dynamically falls back to Gemini for that call.
+
+## Itinerary Generation Flow (Legacy)
 
 ### Step-by-Step Process
 
@@ -300,7 +469,7 @@ Response: {
 6. **Build Itinerary object** — map JSON to dataclass hierarchy
 7. **Validate feasibility** — day count, meals, budget, activity count, interest coverage
 
-### Gemini System Instruction (Key Points)
+### Gemini System Instruction (Legacy Flow Key Points)
 - Generates itineraries for **any city** (not hardcoded to Kingston)
 - When venue data from DB is provided, **prefers those venues** over invented ones
 - Activities from the DB are marked with `from_database: true`
@@ -319,22 +488,34 @@ Response: {
 ```
 MonVoyage/
 ├── backend/
-│   ├── app.py                          # FastAPI application entry point (uvicorn, port 8000)
+│   ├── app.py                          # FastAPI application (6 endpoints, lifespan mgmt)
 │   ├── config/
-│   │   └── settings.py                 # Configuration (Gemini + Groq + DB URL)
+│   │   └── settings.py                 # Configuration (Gemini + Groq + DB URL + pace params)
 │   ├── schemas/
 │   │   ├── __init__.py
-│   │   └── api_models.py              # Pydantic request/response models ✅ NEW
+│   │   └── api_models.py              # Pydantic: ExtractReq, RefineReq, ChatReq/Resp, etc.
 │   ├── models/
-│   │   ├── trip_preferences.py         # TripPreferences dataclass
-│   │   └── itinerary.py               # Itinerary data structures (with from_database flag)
+│   │   ├── trip_preferences.py         # TripPreferences dataclass (pace synonyms, interest mapping)
+│   │   └── itinerary.py               # Itinerary, Activity (from_database), Meal, TravelSegment
 │   ├── services/
-│   │   ├── nlp_extraction_service.py   # NLP extraction logic (async) ✅
-│   │   ├── itinerary_service.py        # Itinerary generation + venue DB integration (async) ✅
-│   │   └── venue_service.py            # Reads venue data from Airflow PostgreSQL ✅
+│   │   ├── conversation_service.py     # Multi-turn chat: greeting→intake→confirmed→itinerary
+│   │   ├── itinerary_orchestrator.py   # Orchestrates enrichment: weather+budget+venues+LLM+routes ✅ NEW
+│   │   ├── nlp_extraction_service.py   # NLP extraction from user input (async)
+│   │   ├── itinerary_service.py        # Itinerary generation + venue DB integration (async)
+│   │   ├── venue_service.py            # Airflow DB queries + TORONTO_FALLBACK_VENUES (15)
+│   │   ├── weather_service.py          # Weather forecasts for trip dates
+│   │   ├── booking_service.py          # Airbnb + flights + bus booking orchestration
+│   │   ├── trip_budget_service.py      # Trip cost estimation wrapper
+│   │   ├── budget_estimator.py         # Core budget calc (Airbnb scraping + flight estimates)
+│   │   └── google_maps_service.py      # Route planning + directions via Google Maps
 │   ├── clients/
-│   │   ├── gemini_client.py            # Gemini API wrapper (primary, async) ✅
-│   │   └── groq_client.py             # Groq API wrapper (fallback, sync) ✅
+│   │   ├── gemini_client.py            # Gemini API (async generate_content + sync chat_with_history)
+│   │   ├── groq_client.py             # Groq API (generate_content, generate_json, chat_with_history)
+│   │   ├── weather_client.py           # Weather forecast API wrapper ✅ NEW
+│   │   ├── airbnb_client.py            # Airbnb price scraping ✅ NEW
+│   │   ├── flight_client.py            # Flight price estimation ✅ NEW
+│   │   ├── busbud_client.py            # Bus/train booking links ✅ NEW
+│   │   └── google_maps_client.py       # Google Maps Directions API ✅ NEW
 │   ├── routes/
 │   │   └── trip_routes.py              # Route definitions (stub - TODO)
 │   ├── controllers/
@@ -351,19 +532,24 @@ MonVoyage/
 │   └── test_imports.py
 ├── airflow/
 │   └── dags/
-│       ├── website_monitor_dag.py      # Daily web scraping DAG ✅
+│       ├── website_monitor_dag.py      # Daily web scraping DAG
 │       ├── trip_placeholder_dag.py     # Deprecated placeholder
 │       └── lib/
-│           ├── db.py                   # SQLAlchemy ORM: Place, TrackedPage, etc. ✅
-│           ├── monitor.py             # HTML fetch + structured extraction ✅
-│           ├── chroma_index.py        # Chroma vector DB integration ✅
-│           ├── retrieval.py           # RAG retrieval logic ✅
-│           ├── seed_tracked_sites.py  # Database seeding ✅
+│           ├── db.py                   # SQLAlchemy ORM: Place, TrackedPage, etc.
+│           ├── monitor.py             # HTML fetch + structured extraction
+│           ├── chroma_index.py        # Chroma vector DB integration
+│           ├── retrieval.py           # RAG retrieval logic
+│           ├── seed_tracked_sites.py  # Database seeding (27 Toronto venues)
 │           └── __init__.py
 ├── frontend/
-│   ├── index.html
+│   ├── index.html                      # Toronto Trip Planner chat UI (calls /api/chat)
 │   └── src/                            # React components, API client, styles
+├── doc/
+│   ├── WORKFLOW_GUIDE.md               # Conversational MVP usage + testing guide ✅ NEW
+│   └── ...                             # Other documentation files
 ├── test/
+│   ├── test_orchestrator.py            # 23 unit tests for ItineraryOrchestrator ✅ NEW
+│   ├── validate_workflow.py            # Automated workflow validation vs running server ✅ NEW
 │   ├── demo_nlp_extraction.py
 │   ├── demo_itinerary_generation.py
 │   └── test_extraction.py
@@ -378,11 +564,11 @@ MonVoyage/
 
 ### Required Environment Variables
 ```bash
-# Gemini API Configuration (Primary LLM)
+# Gemini API Configuration (Primary for legacy extraction; fallback for chat)
 GEMINI_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3-flash-preview
 
-# Groq API Configuration (Fallback LLM)
+# Groq API Configuration (Primary for chat; fallback for legacy extraction)
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=llama-3.3-70b-versatile
 
@@ -405,13 +591,19 @@ EXTRACTION_MAX_TOKENS=2048
 # Itinerary Generation Settings
 ITINERARY_TEMPERATURE=0.7
 ITINERARY_MAX_TOKENS=8192
+
+# Google Maps API (Optional — for route enrichment)
+GOOGLE_MAPS_API_KEY=
 ```
 
 ### Setup Instructions
 1. Copy `backend/.env.example` to `backend/.env`
-2. Add your Gemini API key from https://aistudio.google.com/apikey
-3. (Optional) Add your Groq API key from https://console.groq.com/keys for fallback
-4. Set `APP_DB_URL` to your PostgreSQL connection string (same DB as Airflow)
+2. Add at least one LLM API key:
+   - **For chat flow**: `GROQ_API_KEY` from https://console.groq.com/keys (recommended)
+   - **For legacy extraction**: `GEMINI_KEY` from https://aistudio.google.com/apikey
+   - **Both**: Chat uses Groq primary + Gemini fallback; legacy uses Gemini primary + Groq fallback
+3. (Optional) Set `APP_DB_URL` to your PostgreSQL connection string (same DB as Airflow)
+4. (Optional) Set `GOOGLE_MAPS_API_KEY` for route enrichment (without it, `route_data` will be `null`)
 5. Activate virtual environment: `source venv/bin/activate`
 6. Install dependencies: `pip install -r requirements.txt`
 7. Run diagnostics: `python backend/diagnose.py`
@@ -505,6 +697,74 @@ export AIRFLOW_CONN_APP_POSTGRES='postgresql://app:app@localhost:5432/app'
 airflow variables set scrape_config '{"max_retries": 3, "delay_seconds": 2}' --json
 ```
 
+## Toronto Fallback Venues
+
+When PostgreSQL is unreachable, `VenueService.get_toronto_venues()` returns 15 built-in fallback venues:
+
+| venue_id | Name | Category |
+|----------|------|----------|
+| `cn_tower` | CN Tower | tourism |
+| `rom` | Royal Ontario Museum | museum |
+| `st_lawrence_market` | St. Lawrence Market | food |
+| `ripley_aquarium` | Ripley's Aquarium of Canada | entertainment |
+| `high_park` | High Park | park |
+| `distillery_district` | Distillery Historic District | culture |
+| `kensington_market` | Kensington Market | food |
+| `hockey_hall_of_fame` | Hockey Hall of Fame | sport |
+| `casa_loma` | Casa Loma | culture |
+| `ago` | Art Gallery of Ontario | museum |
+| `toronto_islands` | Toronto Islands | park |
+| `harbourfront_centre` | Harbourfront Centre | entertainment |
+| `bata_shoe_museum` | Bata Shoe Museum | museum |
+| `toronto_zoo` | Toronto Zoo | entertainment |
+| `aga_khan_museum` | Aga Khan Museum | museum |
+
+The full seed database (`seed_tracked_sites.py`) contains 27 Toronto venues including additional entries like Steam Whistle Brewery, Rogers Centre, Scotiabank Arena, Toronto Eaton Centre, and others.
+
+## Enrichment Services (Wired via ItineraryOrchestrator)
+
+The following services are wired into the chat flow via `ItineraryOrchestrator`. They run in parallel during the itinerary phase and all degrade gracefully to `null` on failure:
+
+### WeatherService (`weather_service.py`)
+- Fetches weather forecasts for trip dates via `WeatherClient` (Open-Meteo API, no key needed)
+- Returns daily forecasts: condition, temp_min/max, precipitation, wind speed, sunrise/sunset
+- **Wired**: Weather context injected into LLM prompt; summary returned as `weather_summary` in response
+- Key method: `get_trip_weather(preferences)` → Dict with forecasts per day
+
+### TripBudgetService (`trip_budget_service.py`) + BudgetEstimator (`budget_estimator.py`)
+- Estimates total trip costs using real Airbnb prices + flight price estimates
+- Returns 3 scenarios: cheapest, average, most expensive
+- Includes booking links (Skyscanner, Airbnb, BusBud)
+- **Wired**: Budget estimation returned as `budget_summary` in response with booking links
+- Key method: `estimate_trip_budget(preferences)` → Dict with cost breakdown
+
+### GoogleMapsService (`google_maps_service.py`)
+- Route planning between venues using Google Maps Directions API
+- Supports driving, transit, and walking modes
+- Falls back to Google Maps URL generation when API unavailable
+- **Wired**: Routes fetched post-LLM from venue names in itinerary; returned as `route_data`
+- Key method: `get_itinerary_routes(venue_names, city, country, mode)` → List[Dict]
+- Requires `GOOGLE_MAPS_API_KEY` in `.env` (optional — `route_data` is `null` without it)
+
+### BookingService (`booking_service.py`)
+- Orchestrates accommodation + transportation booking
+- Uses `AirbnbClient` (price scraping), `FlightClient` (estimates), `BusbudClient` (links)
+- Supports 4 booking types: `"none"`, `"accommodation"`, `"transportation"`, `"both"`
+- **Not yet wired** to chat flow (used indirectly via TripBudgetService for cost estimation)
+- Key method: `book_trip(preferences)` → Dict with links and results
+
+### ItineraryOrchestrator (`itinerary_orchestrator.py`)
+
+The orchestrator is the central coordinator for the enriched itinerary workflow:
+
+1. **Preference extraction** (State C): Regex-based extraction of dates, budget, interests, pace from conversation history — avoids extra LLM call
+2. **Parallel enrichment** (State D): `asyncio.gather` fetches weather + budget + venues simultaneously
+3. **LLM generation** (State D): Builds prompt with venue catalogue + weather context → Groq/Gemini
+4. **Route enrichment** (State D): Extracts venue names from itinerary text → GoogleMaps route fetch
+5. **Response assembly** (State E): Combines itinerary text + weather summary + budget summary + route data
+
+**Error handling**: All enrichment failures are logged at WARNING and return `null`. Only LLM failure is fatal (raises exception → 500). The orchestrator itself is optional — if it fails entirely, `ConversationService` falls back to the legacy venue-only generation path.
+
 ## Validation Rules
 
 - **Budget**: Daily budget MUST BE >= $50 (for two meals + activities)
@@ -534,21 +794,40 @@ airflow variables set scrape_config '{"max_retries": 3, "delay_seconds": 2}' --j
 
 ## Testing Scenarios for Demo
 
-### Test Case 1: Basic Extraction (Multi-City)
-**Input**: "I want to visit Toronto from March 15-17, 2026. Budget is $300. I'm interested in food and museums."
-**Expected**: Extract city=Toronto, dates, budget ($100/day), interests [Food and Beverage, Culture and History]
+### Conversational Chat Flow Tests
 
-### Test Case 2: Budget Validation
-**Input**: "Planning 3-day trip with $100 total budget"
+#### Test Case 1: Full Conversation Flow
+1. Open http://localhost:8000 — greeting appears automatically
+2. Type: "I want to visit March 15-17, budget $300, love museums and food, moderate pace"
+3. Assistant should recognize all 4 fields → ask confirmation
+4. Type: "Yes" → generates grounded itinerary with Source citations
+**Verify**: Every activity has `Source: {venue_id}, {url}`
+
+#### Test Case 2: Multi-Turn Intake
+1. Type: "March 15-17" → assistant asks for budget
+2. Type: "$300" → assistant asks for interests
+3. Type: "museums and food" → assistant asks for pace
+4. Type: "moderate" → confirmation question
+**Verify**: `Still need:` list shrinks after each turn
+
+#### Test Case 3: Closed-World Enforcement
+1. Complete intake, get confirmation
+2. During intake, say: "I want to visit the Eiffel Tower"
+3. **Expected**: Assistant refuses and suggests alternatives from the Toronto venue list
+
+#### Test Case 4: Graceful Degradation (No DB)
+- Stop PostgreSQL, restart server
+- **Expected**: Chat flow works using `TORONTO_FALLBACK_VENUES`; itinerary still has Source citations
+
+### Legacy Endpoint Tests
+
+#### Test Case 5: Basic Extraction (Multi-City)
+**Input**: `POST /api/extract` with "I want to visit Toronto from March 15-17, 2026. Budget is $300."
+**Expected**: Extract city=Toronto, dates, budget ($100/day), interests
+
+#### Test Case 6: Budget Validation
+**Input**: `POST /api/extract` with "Planning 3-day trip with $100 total budget"
 **Expected**: Calculate $33/day, reject with message about $50/day minimum
-
-### Test Case 3: Itinerary with DB Venues
-**Input**: Complete preferences for Toronto with interests [Culture and History]
-**Expected**: ItineraryService queries Airflow DB for Toronto venues, includes them in prompt, generated activities have `from_database: true`
-
-### Test Case 4: Graceful Degradation (No DB)
-**Input**: Complete preferences for a city with no venues in DB
-**Expected**: ItineraryService generates itinerary using Gemini's knowledge, no `from_database` flags
 
 ## Known Issues & Solutions
 
@@ -570,14 +849,20 @@ airflow variables set scrape_config '{"max_retries": 3, "delay_seconds": 2}' --j
 
 ## Important Notes for Claude
 
-1. **Multi-city support**: The system works for any city. Do NOT hardcode city names.
+1. **Two parallel systems**: Chat flow (`/api/chat`) is Toronto-only; legacy flow supports any city
 2. **Never remove fields** from TripPreferences without understanding full impact
 3. **Always validate** user inputs against minimum requirements before proceeding
 4. **Be conservative** in extraction — only extract explicitly mentioned information
 5. **Follow the layered architecture** — don't mix concerns between schemas, services, and clients
-6. **Venue DB is optional** — the system must work even if PostgreSQL is unreachable
+6. **Venue DB is optional** — the system must work even if PostgreSQL is unreachable (fallback venues exist)
 7. **Document changes** to schemas, APIs, or core logic in this CLAUDE.md file
 8. **FastAPI async pattern** — service methods are async; sync I/O (Groq, SQLAlchemy) uses `run_in_executor`
+9. **Closed-world constraint** — itineraries from `/api/chat` must ONLY use venues from the venue list
+10. **Source citations** — every itinerary activity must include `Source: {venue_id}, {url}`
+11. **Dual-LLM** — ConversationService tries Groq first, falls back to Gemini; legacy services do the reverse
+12. **Enrichment is fail-soft** — weather/budget/routes return `null` on failure; only LLM failure is fatal
+13. **Orchestrator is optional** — if `ItineraryOrchestrator` fails, `ConversationService` falls back to legacy venue-only path
+14. **No internal system names in user messages** — enrichment failures should never be mentioned to the user; data is in structured response fields only
 
 ## Pending Development
 
@@ -590,15 +875,43 @@ airflow variables set scrape_config '{"max_retries": 3, "delay_seconds": 2}' --j
 - [x] Multi-city support (removed Kingston-only hardcoding)
 - [x] Add `/api/generate-itinerary` endpoint to `app.py`
 - [x] Migrate Flask → FastAPI with async/await, Pydantic validation, auto-docs
-- [ ] Seed database with Toronto venues
-- [ ] Add Google Maps API for geocoding
+
+### Phase 2.5 — Conversational Toronto MVP (COMPLETE)
+- [x] Seed database with 27 Toronto venues
+- [x] Add `chat_with_history()` to GroqClient and GeminiClient
+- [x] Create `ConversationService` with 4-phase flow (greeting → intake → confirmed → itinerary)
+- [x] Add `/api/chat` endpoint with ChatRequest/ChatResponse schemas
+- [x] Implement closed-world itinerary generation with Source citations
+- [x] Add `TORONTO_FALLBACK_VENUES` (15 venues) for DB-free demo
+- [x] Rewrite frontend for Toronto Trip Planner with `/api/chat` integration
+- [x] Create `doc/WORKFLOW_GUIDE.md`
+- [x] Implement WeatherService + WeatherClient
+- [x] Implement BookingService (Airbnb + flights + buses)
+- [x] Implement TripBudgetService + BudgetEstimator
+- [x] Implement GoogleMapsService + GoogleMapsClient
+- [x] Dual-LLM support (Groq primary → Gemini fallback) in ConversationService
+
+### Phase 2.5+ — Enriched Itinerary Workflow (COMPLETE)
+- [x] Create `ItineraryOrchestrator` to coordinate all enrichment services
+- [x] Wire WeatherService into chat flow (weather context in LLM prompt + `weather_summary` response)
+- [x] Wire TripBudgetService into chat flow (`budget_summary` response with booking links)
+- [x] Wire GoogleMapsService into chat flow (`route_data` response with directions)
+- [x] Regex-based preference extraction from conversation history (no extra LLM call)
+- [x] Parallel service execution with `asyncio.gather` + fail-soft error handling
+- [x] Extend `ChatResponse` schema with `weather_summary`, `budget_summary`, `route_data`
+- [x] Update frontend right panel with enrichment cards (weather, budget, routes)
+- [x] Create `test/test_orchestrator.py` with 23 unit tests
+- [x] Create `test/validate_workflow.py` automated validation script
+- [x] Backwards-compatible: orchestrator failure falls back to legacy venue-only path
 
 ### Phase 3: Advanced Features
-- [ ] Multi-modal transportation planning
-- [ ] Weather API integration
-- [ ] Real-time budget tracking
-- [ ] Schedule adaptation engine
-- [ ] Expand Airflow scraping to more cities
+- [ ] Wire BookingService directly to API endpoints (accommodation + transport booking)
+- [ ] Multi-modal transportation planning with real Google Maps routes in itinerary
+- [ ] Schedule adaptation engine (re-generate itinerary with updated preferences)
+- [ ] Expand Airflow scraping to more cities beyond Toronto
+- [ ] Add Google Maps geocoding for venue location validation
+- [ ] User authentication + trip persistence (save/load itineraries)
+- [ ] Multi-language support
 
 ## Quick Reference Commands
 
@@ -627,8 +940,14 @@ airflow standalone
 # Trigger scraping DAG manually
 airflow dags trigger website_change_monitor
 
-# Run tests
+# Run all tests
 pytest test/
+
+# Run orchestrator unit tests (23 tests)
+pytest test/test_orchestrator.py -v
+
+# Run automated workflow validation (requires running server)
+python3 test/validate_workflow.py
 
 # Format code
 black backend/
@@ -650,6 +969,6 @@ flake8 backend/
 
 ---
 
-**Last Updated**: 2026-02-07
-**Phase**: Phase 2 Complete (FastAPI + Itinerary + Airflow DB)
-**Next Steps**: Seed Toronto venues, add Google Maps geocoding, begin Phase 3 features
+**Last Updated**: 2026-02-08
+**Phase**: Phase 2.5+ Complete (Enriched Itinerary Workflow with Weather/Budget/Routes)
+**Next Steps**: Wire BookingService to API endpoints, schedule adaptation engine, multi-city expansion

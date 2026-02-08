@@ -7,108 +7,38 @@ from sqlalchemy import text
 from lib.db import get_engine, init_db
 
 PLACES = [
-    # --- Kingston / Brockville ---
-    {
-        "place_key": "visit_1000_islands",
-        "canonical_name": "Visit 1000 Islands",
-        "city": "Kingston/Brockville",
-        "category": "tourism",
-    },
-    # --- Toronto ---
-    {
-        "place_key": "cn_tower",
-        "canonical_name": "CN Tower",
-        "city": "Toronto",
-        "category": "tourism",
-    },
-    {
-        "place_key": "rom",
-        "canonical_name": "Royal Ontario Museum",
-        "city": "Toronto",
-        "category": "museum",
-    },
-    {
-        "place_key": "st_lawrence_market",
-        "canonical_name": "St. Lawrence Market",
-        "city": "Toronto",
-        "category": "food",
-    },
-    {
-        "place_key": "ripley_aquarium",
-        "canonical_name": "Ripley's Aquarium of Canada",
-        "city": "Toronto",
-        "category": "entertainment",
-    },
-    {
-        "place_key": "high_park",
-        "canonical_name": "High Park",
-        "city": "Toronto",
-        "category": "park",
-    },
-    {
-        "place_key": "distillery_district",
-        "canonical_name": "Distillery Historic District",
-        "city": "Toronto",
-        "category": "culture",
-    },
-    {
-        "place_key": "kensington_market",
-        "canonical_name": "Kensington Market",
-        "city": "Toronto",
-        "category": "food",
-    },
-    {
-        "place_key": "hockey_hall_of_fame",
-        "canonical_name": "Hockey Hall of Fame",
-        "city": "Toronto",
-        "category": "sport",
-    },
-    {
-        "place_key": "casa_loma",
-        "canonical_name": "Casa Loma",
-        "city": "Toronto",
-        "category": "culture",
-    },
-    {
-        "place_key": "ago",
-        "canonical_name": "Art Gallery of Ontario",
-        "city": "Toronto",
-        "category": "museum",
-    },
-    {
-        "place_key": "toronto_islands",
-        "canonical_name": "Toronto Islands",
-        "city": "Toronto",
-        "category": "park",
-    },
-    {
-        "place_key": "harbourfront_centre",
-        "canonical_name": "Harbourfront Centre",
-        "city": "Toronto",
-        "category": "entertainment",
-    },
-    {
-        "place_key": "bata_shoe_museum",
-        "canonical_name": "Bata Shoe Museum",
-        "city": "Toronto",
-        "category": "museum",
-    },
-    {
-        "place_key": "toronto_zoo",
-        "canonical_name": "Toronto Zoo",
-        "city": "Toronto",
-        "category": "entertainment",
-    },
-    {
-        "place_key": "aga_khan_museum",
-        "canonical_name": "Aga Khan Museum",
-        "city": "Toronto",
-        "category": "museum",
-    },
+    {"place_key": "visit_1000_islands", "canonical_name": "Visit 1000 Islands", "city": "Kingston/Brockville", "category": "tourism"},
+
+    {"place_key": "cn_tower", "canonical_name": "CN Tower", "city": "Toronto", "category": "tourism"},
+    {"place_key": "toronto_islands_ferry", "canonical_name": "Toronto Islands Ferry", "city": "Toronto", "category": "island"},
+    {"place_key": "yorkdale_shopping_centre", "canonical_name": "Yorkdale Shopping Centre", "city": "Toronto", "category": "shopping"},
+    {"place_key": "rogers_centre", "canonical_name": "Rogers Centre", "city": "Toronto", "category": "sport"},
+    {"place_key": "happy_lamb_hot_pot", "canonical_name": "Happy Lamb Hot Pot", "city": "Toronto", "category": "restaurant"},
+    {"place_key": "royal_ontario_museum", "canonical_name": "Royal Ontario Museum", "city": "Toronto", "category": "museum"},
+    {"place_key": "art_gallery_ontario", "canonical_name": "Art Gallery of Ontario", "city": "Toronto", "category": "gallery"},
+    {"place_key": "earl_bales_ski_centre", "canonical_name": "Earl Bales Ski and Snowboard Centre", "city": "Toronto", "category": "recreation"},
+    {"place_key": "cong_ca_phe_toronto", "canonical_name": "Cong Ca Phe Toronto", "city": "Toronto", "category": "cafe"},
+    {"place_key": "toronto_eaton_centre", "canonical_name": "CF Toronto Eaton Centre", "city": "Toronto", "category": "shopping"},
+    {"place_key": "st_lawrence_market", "canonical_name": "St. Lawrence Market", "city": "Toronto", "category": "food"},
+    {"place_key": "ripleys_aquarium_canada", "canonical_name": "Ripley's Aquarium of Canada", "city": "Toronto", "category": "entertainment"},
+    {"place_key": "casa_loma", "canonical_name": "Casa Loma", "city": "Toronto", "category": "historic"},
+    {"place_key": "toronto_zoo", "canonical_name": "Toronto Zoo", "city": "Toronto", "category": "park"},
+    {"place_key": "ontario_science_centre", "canonical_name": "Ontario Science Centre", "city": "Toronto", "category": "museum"},
+    {"place_key": "distillery_district", "canonical_name": "Distillery Historic District", "city": "Toronto", "category": "historic"},
+    {"place_key": "high_park", "canonical_name": "High Park", "city": "Toronto", "category": "park"},
+    {"place_key": "nathan_phillips_square", "canonical_name": "Nathan Phillips Square", "city": "Toronto", "category": "entertainment"},
+    {"place_key": "scotiabank_arena", "canonical_name": "Scotiabank Arena", "city": "Toronto", "category": "sport"},
+    {"place_key": "toronto_symphony_orchestra", "canonical_name": "Toronto Symphony Orchestra", "city": "Toronto", "category": "entertainment"},
+    {"place_key": "kensington_market", "canonical_name": "Kensington Market", "city": "Toronto", "category": "food"},
+    {"place_key": "rec_room_toronto", "canonical_name": "The Rec Room Toronto Roundhouse", "city": "Toronto", "category": "entertainment"},
+    {"place_key": "steam_whistle_brewery", "canonical_name": "Steam Whistle Brewery", "city": "Toronto", "category": "brewery"},
+    {"place_key": "aga_khan_museum", "canonical_name": "Aga Khan Museum", "city": "Toronto", "category": "museum"},
+    {"place_key": "harbourfront_centre", "canonical_name": "Harbourfront Centre", "city": "Toronto", "category": "entertainment"},
+    {"place_key": "allan_gardens_conservatory", "canonical_name": "Allan Gardens Conservatory", "city": "Toronto", "category": "garden"},
 ]
 
+
 PAGES = [
-    # --- Kingston / Brockville ---
     {
         "place_key": "visit_1000_islands",
         "url": "https://visit1000islands.com/",
@@ -117,22 +47,65 @@ PAGES = [
         "css_rules": None,
         "enabled": True,
     },
-    # --- Toronto ---
-    {"place_key": "cn_tower", "url": "https://www.cntower.ca", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "rom", "url": "https://www.rom.on.ca", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "st_lawrence_market", "url": "https://www.stlawrencemarket.com", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "ripley_aquarium", "url": "https://www.ripleyaquariums.com/canada", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "high_park", "url": "https://www.highparktoronto.com", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "distillery_district", "url": "https://www.thedistillerydistrict.com", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "kensington_market", "url": "https://www.kensingtonmarket.ca", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "hockey_hall_of_fame", "url": "https://www.hhof.com", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "casa_loma", "url": "https://casaloma.ca", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "ago", "url": "https://ago.ca", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "toronto_islands", "url": "https://www.toronto.ca/explore-enjoy/parks-gardens-beaches/toronto-islands", "page_type": "overview", "extract_strategy": "text", "css_rules": None, "enabled": True},
-    {"place_key": "harbourfront_centre", "url": "https://www.harbourfrontcentre.com", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "bata_shoe_museum", "url": "https://www.batashoemuseum.ca", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "toronto_zoo", "url": "https://www.torontozoo.com", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
-    {"place_key": "aga_khan_museum", "url": "https://www.agakhanmuseum.org", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "cn_tower", "url": "https://www.cntower.ca/plan-your-visit/tickets-and-hours/tickets", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "cn_tower", "url": "https://www.cntower.ca/plan-your-visit/tickets-and-hours/hours", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "toronto_islands_ferry", "url": "https://www.toronto.ca/explore-enjoy/parks-recreation/places-spaces/beaches-gardens-attractions/toronto-island-park/all-ferry-schedules/", "page_type": "schedule", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "yorkdale_shopping_centre", "url": "https://yorkdale.com/", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "rogers_centre", "url": "https://www.ticketmaster.ca/rogers-centre-tickets-toronto/venue/131114", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "happy_lamb_hot_pot", "url": "https://happylambhotpotca.com/menu.html", "page_type": "menu", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "royal_ontario_museum", "url": "https://tickets.rom.on.ca/en/shop", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "royal_ontario_museum", "url": "https://www.rom.on.ca/visit/visitor-information", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "art_gallery_ontario", "url": "https://ago.ca/visit/location-hours-admission", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "art_gallery_ontario", "url": "https://visit.ago.ca/56644/58933", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "earl_bales_ski_centre", "url": "https://www.toronto.ca/explore-enjoy/parks-recreation/places-spaces/parks-and-recreation-facilities/location/?id=2766&title=Earl-Bales-Ski-and-Snowboard-Centre", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "earl_bales_ski_centre", "url": "https://www.toronto.ca/explore-enjoy/parks-recreation/program-activities/ice-snow-activities/downhill-skiing-snowboarding-centres/", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "cong_ca_phe_toronto", "url": "https://congcaphe.ca/menu/#heading__food", "page_type": "menu", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "toronto_eaton_centre", "url": "https://shops.cadillacfairview.com/property/cf-toronto-eaton-centre", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "st_lawrence_market", "url": "https://www.stlawrencemarket.com/", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "ripleys_aquarium_canada", "url": "https://www.ripleyaquariums.com/canada/buy-tickets/", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "ripleys_aquarium_canada", "url": "https://www.ripleyaquariums.com/canada/hours/", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "casa_loma", "url": "https://casaloma.ca/project/admission/", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "casa_loma", "url": "https://casaloma.ca/", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "toronto_zoo", "url": "https://www.torontozoo.com/tickets", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+    {"place_key": "toronto_zoo", "url": "https://www.torontozoo.com/hours", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "ontario_science_centre", "url": "https://www.ontariosciencecentre.ca/visit", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "distillery_district", "url": "https://www.thedistillerydistrict.com/", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "high_park", "url": "https://www.toronto.ca/data/parks/prd/facilities/complex/108/index.html", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "nathan_phillips_square", "url": "https://www.toronto.ca/data/parks/prd/facilities/complex/1/index.html", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "scotiabank_arena", "url": "https://www.ticketmaster.ca/scotiabank-arena-tickets-toronto/venue/131080", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "toronto_symphony_orchestra", "url": "https://www.tso.ca/concerts-and-events/", "page_type": "tickets", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "kensington_market", "url": "https://kensingtonmarket.to/", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "rec_room_toronto", "url": "https://www.therecroom.com/toronto-roundhouse", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "steam_whistle_brewery", "url": "https://steamwhistle.ca/pages/brewery-tours", "page_type": "tours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "aga_khan_museum", "url": "https://agakhanmuseum.org/visit/tickets-hours.html", "page_type": "tickets_hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "harbourfront_centre", "url": "https://harbourfrontcentre.com/", "page_type": "overview", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
+
+    {"place_key": "allan_gardens_conservatory", "url": "https://www.toronto.ca/data/parks/prd/facilities/complex/27/index.html", "page_type": "hours", "extract_strategy": "jsonld", "css_rules": None, "enabled": True},
 ]
 
 
@@ -153,18 +126,19 @@ def main() -> None:
     upsert_place_stmt = text(
         """
         INSERT INTO places (
-          place_key, canonical_name, city, category,
+          place_key, canonical_name, name, city, category,
           profile_json,
           content_json, content_hash
         )
         VALUES (
-          :place_key, :canonical_name, :city, :category,
+          :place_key, :canonical_name, :canonical_name, :city, :category,
           COALESCE(CAST(:profile_json AS jsonb), '{}'::jsonb),
           COALESCE(CAST(:content_json AS jsonb), '{}'::jsonb),
           COALESCE(:content_hash, :fallback_hash)
         )
         ON CONFLICT (place_key) DO UPDATE SET
           canonical_name = EXCLUDED.canonical_name,
+          name = EXCLUDED.name,
           city = EXCLUDED.city,
           category = EXCLUDED.category,
           profile_json = EXCLUDED.profile_json,

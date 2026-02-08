@@ -1,6 +1,6 @@
 """
 NLP service for extracting structured trip preferences from natural language input.
-Uses Gemini API (primary) or Groq API (fallback) to parse user messages and extract travel details.
+Uses Groq API (primary) or Gemini API (fallback) to parse user messages and extract travel details.
 """
 import json
 import os
@@ -16,30 +16,45 @@ from config.settings import settings
 class NLPExtractionService:
     """Service for extracting trip preferences from natural language."""
 
-    def __init__(self, use_gemini: bool = True):
+    def __init__(self, use_groq: bool = True):
         """
-        Initialize the extraction service with Gemini (primary) or Groq (fallback) client.
+        Initialize the extraction service with Groq (primary) or Gemini (fallback) client.
 
         Args:
-            use_gemini: If True, use Gemini API. If False, use Groq API.
+            use_groq: If True, use Groq API. If False, use Gemini API.
         """
-        self.use_gemini = use_gemini
+        self.use_groq = use_groq
+        self.use_gemini = False
 
         try:
-            if use_gemini and settings.GEMINI_KEY:
+            # Try Groq first (primary)
+            if use_groq and settings.GROQ_API_KEY:
+                self.groq_client = GroqClient()
+                self.gemini_client = None
+                self.use_groq = True
+                self.use_gemini = False
+                print("✅ Using Groq API (Primary)")
+            # Fallback to Gemini if Groq not available
+            elif settings.GEMINI_KEY:
                 self.gemini_client = GeminiClient()
                 self.groq_client = None
-                print("✅ Using Gemini API (Primary)")
+                self.use_groq = False
+                self.use_gemini = True
+                print("✅ Using Gemini API (Fallback)")
             else:
-                self.gemini_client = None
-                self.groq_client = GroqClient()
-                print("✅ Using Groq API (Fallback)")
+                raise ValueError("No API keys configured. Set GROQ_API_KEY or GEMINI_KEY in .env")
         except Exception as e:
-            # If Gemini fails, fallback to Groq
-            print(f"⚠️  Gemini initialization failed, using Groq fallback: {e}")
-            self.gemini_client = None
-            self.groq_client = GroqClient()
-            self.use_gemini = False
+            # If Groq fails, try Gemini as fallback
+            if not self.use_gemini:
+                try:
+                    print(f"⚠️  Groq initialization failed, trying Gemini fallback: {e}")
+                    self.gemini_client = GeminiClient()
+                    self.groq_client = None
+                    self.use_groq = False
+                    self.use_gemini = True
+                    print("✅ Using Gemini API (Fallback)")
+                except Exception as gemini_error:
+                    raise ValueError(f"Both Groq and Gemini initialization failed. Groq: {e}, Gemini: {gemini_error}")
 
         self.system_instruction = self._build_system_instruction()
 
@@ -143,7 +158,20 @@ class NLPExtractionService:
         prompt = self._build_extraction_prompt(user_input)
 
         try:
-            if self.use_gemini and self.gemini_client:
+            if self.use_groq and self.groq_client:
+                # Call Groq API (sync) — run in thread pool to avoid blocking
+                loop = asyncio.get_running_loop()
+                extracted_data = await loop.run_in_executor(
+                    None,
+                    lambda: self.groq_client.generate_json(
+                        prompt=prompt,
+                        system_instruction=self.system_instruction,
+                        temperature=settings.GROQ_TEMPERATURE,
+                        max_tokens=settings.GROQ_MAX_TOKENS,
+                    ),
+                )
+
+            elif self.use_gemini and self.gemini_client:
                 # Call Gemini API (native async — no asyncio.run wrapper needed)
                 extracted_text = await self.gemini_client.generate_content(
                     prompt=prompt,
@@ -160,19 +188,8 @@ class NLPExtractionService:
                     extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
 
                 extracted_data = json.loads(extracted_text)
-
             else:
-                # Call Groq API (sync) — run in thread pool to avoid blocking
-                loop = asyncio.get_running_loop()
-                extracted_data = await loop.run_in_executor(
-                    None,
-                    lambda: self.groq_client.generate_json(
-                        prompt=prompt,
-                        system_instruction=self.system_instruction,
-                        temperature=settings.GROQ_TEMPERATURE,
-                        max_tokens=settings.GROQ_MAX_TOKENS,
-                    ),
-                )
+                raise ValueError("No LLM client available")
 
             # Create TripPreferences object
             preferences = TripPreferences(**extracted_data)
@@ -388,17 +405,29 @@ Example format: "Got it, [acknowledge their input]! [Ask for next field?]"
 Response:"""
 
         try:
-            # Generate conversational response using Groq API (sync → thread pool)
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.groq_client.generate_content(
+            # Generate conversational response using available LLM
+            if self.use_groq and self.groq_client:
+                # Groq API (sync → thread pool)
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.groq_client.generate_content(
+                        prompt=prompt,
+                        system_instruction=system_instruction,
+                        temperature=0.7,  # Higher temp for more natural variety
+                        max_tokens=300,  # Keep responses concise
+                    ),
+                )
+            elif self.use_gemini and self.gemini_client:
+                # Gemini API (async)
+                response = await self.gemini_client.generate_content(
                     prompt=prompt,
                     system_instruction=system_instruction,
-                    temperature=0.7,  # Higher temp for more natural variety
-                    max_tokens=300,  # Keep responses concise
-                ),
-            )
+                    temperature=0.7,
+                    max_tokens=300,
+                )
+            else:
+                raise ValueError("No LLM client available")
 
             print(f"Generated response: {response.strip()}")
             print(f"All questions asked: {all_questions_asked}")
@@ -451,17 +480,37 @@ Examples:
 Return the complete updated JSON object with the same structure:"""
 
         try:
-            # Groq is sync — run in thread pool to avoid blocking the event loop
-            loop = asyncio.get_running_loop()
-            updated_data = await loop.run_in_executor(
-                None,
-                lambda: self.groq_client.generate_json(
+            if self.use_groq and self.groq_client:
+                # Groq is sync — run in thread pool to avoid blocking the event loop
+                loop = asyncio.get_running_loop()
+                updated_data = await loop.run_in_executor(
+                    None,
+                    lambda: self.groq_client.generate_json(
+                        prompt=prompt,
+                        system_instruction=self.system_instruction,
+                        temperature=settings.GROQ_TEMPERATURE,
+                        max_tokens=settings.GROQ_MAX_TOKENS,
+                    ),
+                )
+            elif self.use_gemini and self.gemini_client:
+                # Gemini API (async)
+                extracted_text = await self.gemini_client.generate_content(
                     prompt=prompt,
                     system_instruction=self.system_instruction,
                     temperature=settings.GEMINI_EXTRACTION_TEMPERATURE,
                     max_tokens=settings.GEMINI_EXTRACTION_MAX_TOKENS,
-                ),
-            )
+                )
+                
+                # Parse JSON from response
+                extracted_text = extracted_text.strip()
+                if extracted_text.startswith("```json"):
+                    extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
+                elif extracted_text.startswith("```"):
+                    extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
+                
+                updated_data = json.loads(extracted_text)
+            else:
+                raise ValueError("No LLM client available")
 
             updated_preferences = TripPreferences.from_dict(updated_data)
 

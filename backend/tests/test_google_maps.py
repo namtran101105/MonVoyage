@@ -3,8 +3,8 @@
 import sys
 import os
 
-# Add backend directory to path for imports
-sys.path.insert(0, os.path.dirname(__file__))
+# Add backend directory to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from clients.google_maps_client import GoogleMapsClient
 

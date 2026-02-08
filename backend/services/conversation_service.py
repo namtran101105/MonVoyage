@@ -17,12 +17,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from clients.groq_client import GroqClient
+from clients.gemini_client import GeminiClient
 from services.venue_service import VenueService
 
+if TYPE_CHECKING:
+    from services.itinerary_orchestrator import ItineraryOrchestrator
+
 logger = logging.getLogger(__name__)
+
+# Type alias for the turn() return value:
+#   (messages, assistant_text, phase, still_need, enrichment)
+TurnResult = Tuple[
+    List[Dict[str, str]],    # messages
+    str,                      # assistant_text
+    str,                      # phase
+    Optional[List[str]],      # still_need
+    Optional[Dict[str, Any]], # enrichment (weather_summary, budget_summary, route_data)
+]
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -113,13 +127,40 @@ _CONFIRMATION_MARKER = "generate your Toronto itinerary"
 class ConversationService:
     """Manages the conversational intake and grounded itinerary generation."""
 
-    def __init__(self) -> None:
-        self.groq_client = GroqClient()
+    def __init__(
+        self,
+        orchestrator: Optional[ItineraryOrchestrator] = None,
+    ) -> None:
+        # Try Groq first, fallback to Gemini
+        self.use_groq = False
+        self.use_gemini = False
+
+        try:
+            from config.settings import settings
+            if settings.GROQ_API_KEY:
+                self.groq_client = GroqClient()
+                self.use_groq = True
+                logger.info("ConversationService: Using Groq as primary LLM")
+        except Exception as e:
+            logger.warning(f"ConversationService: Groq unavailable ({e}), trying Gemini")
+
+        if not self.use_groq:
+            try:
+                self.gemini_client = GeminiClient()
+                self.use_gemini = True
+                logger.info("ConversationService: Using Gemini as LLM")
+            except Exception as e:
+                logger.error(f"ConversationService: No LLM available! Groq and Gemini both failed.")
+                raise ValueError("No LLM available - both Groq and Gemini failed to initialize")
+
         try:
             self.venue_service = VenueService()
         except Exception:
             logger.warning("VenueService init failed — will use fallback venues")
             self.venue_service = None  # type: ignore[assignment]
+
+        # Orchestrator for enriched itinerary generation (optional)
+        self.orchestrator = orchestrator
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -129,7 +170,7 @@ class ConversationService:
         self,
         messages: List[Dict[str, str]],
         user_input: Optional[str],
-    ) -> Tuple[List[Dict[str, str]], str, str, Optional[List[str]]]:
+    ) -> TurnResult:
         """
         Process one conversation turn.
 
@@ -138,7 +179,9 @@ class ConversationService:
             user_input: The latest user message (None to trigger greeting).
 
         Returns:
-            Tuple of (updated_messages, assistant_text, phase, still_need).
+            Tuple of (updated_messages, assistant_text, phase, still_need, enrichment).
+            ``enrichment`` is a dict with weather_summary, budget_summary, route_data
+            (only populated in the itinerary phase; None otherwise).
         """
         # --- Phase: greeting (empty conversation) -------------------------
         if not messages or (not user_input and len(messages) == 0):
@@ -159,9 +202,7 @@ class ConversationService:
     # Phase handlers
     # ------------------------------------------------------------------
 
-    def _greeting(
-        self,
-    ) -> Tuple[List[Dict[str, str]], str, str, Optional[List[str]]]:
+    def _greeting(self) -> TurnResult:
         """Return a warm greeting without calling the LLM."""
         greeting = (
             "Hey there! Welcome to the Toronto Trip Planner! "
@@ -181,25 +222,50 @@ class ConversationService:
             greeting,
             "greeting",
             ["travel dates", "budget", "interests", "pace"],
+            None,  # no enrichment
         )
 
     async def _intake_turn(
-        self, messages: List[Dict[str, str]]
-    ) -> Tuple[List[Dict[str, str]], str, str, Optional[List[str]]]:
-        """Run one intake turn through Groq."""
+        self, messages: List[Dict[str, str]],
+    ) -> TurnResult:
+        """Run one intake turn through Groq or Gemini."""
         # Ensure the system prompt is present
         if not messages or messages[0].get("role") != "system":
             messages.insert(0, {"role": "system", "content": INTAKE_SYSTEM_PROMPT})
 
         loop = asyncio.get_running_loop()
-        response_text: str = await loop.run_in_executor(
-            None,
-            lambda: self.groq_client.chat_with_history(
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1024,
-            ),
-        )
+        response_text: str = ""
+
+        # Try Groq first
+        if self.use_groq:
+            try:
+                response_text = await loop.run_in_executor(
+                    None,
+                    lambda: self.groq_client.chat_with_history(
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=1024,
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Groq failed in intake_turn, trying Gemini: {e}")
+                if not hasattr(self, 'gemini_client'):
+                    self.gemini_client = GeminiClient()
+                self.use_gemini = True
+
+        # Fallback to Gemini
+        if not response_text and self.use_gemini:
+            response_text = await loop.run_in_executor(
+                None,
+                lambda: self.gemini_client.chat_with_history(
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=1024,
+                ),
+            )
+
+        if not response_text:
+            raise Exception("No LLM response - both Groq and Gemini failed")
 
         messages.append({"role": "assistant", "content": response_text})
 
@@ -211,17 +277,58 @@ class ConversationService:
         if _CONFIRMATION_MARKER.lower() in response_text.lower():
             phase = "confirmed"
 
-        return messages, response_text, phase, still_need
+        return messages, response_text, phase, still_need, None
 
     async def _generate_grounded_itinerary(
-        self, messages: List[Dict[str, str]]
-    ) -> Tuple[List[Dict[str, str]], str, str, Optional[List[str]]]:
-        """Fetch venues, build grounded prompt, and generate the itinerary."""
-        # Fetch Toronto venues (DB or fallback)
+        self, messages: List[Dict[str, str]],
+    ) -> TurnResult:
+        """Fetch venues, build grounded prompt, and generate the itinerary.
+
+        If an ``ItineraryOrchestrator`` is available, it handles weather,
+        budget, route enrichment in parallel with venue fetch.  Otherwise
+        falls back to the original venues-only flow.
+        """
+        # ── Enriched path (orchestrator available) ────────────────────
+        if self.orchestrator:
+            try:
+                # Ensure Gemini client is available for fallback
+                gemini = getattr(self, "gemini_client", None)
+                if not gemini and not self.use_groq:
+                    gemini = GeminiClient()
+                    self.gemini_client = gemini
+
+                result = await self.orchestrator.generate_enriched_itinerary(
+                    messages=messages,
+                    llm_caller=None,  # not used; clients passed directly
+                    use_groq=self.use_groq,
+                    use_gemini=self.use_gemini or gemini is not None,
+                    groq_client=getattr(self, "groq_client", None),
+                    gemini_client=getattr(self, "gemini_client", None),
+                )
+
+                itinerary_text = result["itinerary_text"]
+                messages.append({"role": "assistant", "content": itinerary_text})
+
+                enrichment: Dict[str, Any] = {
+                    "weather_summary": result.get("weather_summary"),
+                    "budget_summary": result.get("budget_summary"),
+                    "route_data": result.get("route_data"),
+                }
+                return messages, itinerary_text, "itinerary", None, enrichment
+
+            except Exception as exc:
+                logger.error(
+                    "Orchestrator failed, falling back to basic itinerary: %s",
+                    exc,
+                    exc_info=True,
+                )
+                # Fall through to legacy path below
+
+        # ── Legacy path (no orchestrator) ─────────────────────────────
         loop = asyncio.get_running_loop()
         if self.venue_service:
             venues = await loop.run_in_executor(
-                None, self.venue_service.get_toronto_venues
+                None, self.venue_service.get_toronto_venues,
             )
         else:
             from services.venue_service import TORONTO_FALLBACK_VENUES
@@ -229,23 +336,16 @@ class ConversationService:
 
         venue_catalogue = VenueService.format_venues_for_chat(venues)
 
-        # Build the itinerary system prompt
         itinerary_system = ITINERARY_SYSTEM_PROMPT_TEMPLATE.format(
             venue_catalogue=venue_catalogue,
         )
 
-        # Build a fresh messages list for the itinerary call.
-        # Include the conversation context so the LLM knows the user's
-        # preferences, but swap the system prompt to the itinerary one.
         itinerary_messages: List[Dict[str, str]] = [
             {"role": "system", "content": itinerary_system},
         ]
-        # Copy over user/assistant turns (skip old system prompt)
         for m in messages:
             if m["role"] != "system":
                 itinerary_messages.append(m)
-
-        # Add an explicit generation instruction
         itinerary_messages.append(
             {
                 "role": "user",
@@ -257,18 +357,40 @@ class ConversationService:
             }
         )
 
-        response_text: str = await loop.run_in_executor(
-            None,
-            lambda: self.groq_client.chat_with_history(
-                messages=itinerary_messages,
-                temperature=0.7,
-                max_tokens=4096,
-            ),
-        )
+        response_text: str = ""
+
+        if self.use_groq:
+            try:
+                response_text = await loop.run_in_executor(
+                    None,
+                    lambda: self.groq_client.chat_with_history(
+                        messages=itinerary_messages,
+                        temperature=0.7,
+                        max_tokens=4096,
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"Groq failed in generate_grounded_itinerary, trying Gemini: {e}")
+                if not hasattr(self, "gemini_client"):
+                    self.gemini_client = GeminiClient()
+                self.use_gemini = True
+
+        if not response_text and self.use_gemini:
+            response_text = await loop.run_in_executor(
+                None,
+                lambda: self.gemini_client.chat_with_history(
+                    messages=itinerary_messages,
+                    temperature=0.7,
+                    max_tokens=4096,
+                ),
+            )
+
+        if not response_text:
+            raise Exception("No LLM response - both Groq and Gemini failed")
 
         messages.append({"role": "assistant", "content": response_text})
 
-        return messages, response_text, "itinerary", None
+        return messages, response_text, "itinerary", None, None
 
     # ------------------------------------------------------------------
     # Helpers
