@@ -14,26 +14,410 @@ An AI-powered itinerary engine that generates feasible, day-by-day travel plans 
 
 ## Quick Start
 
+### 1. Prerequisites
+
+- Python 3.9+
+- PostgreSQL 12+ (for venue database)
+- Node.js 16+ (for frontend dev server, optional)
+- Docker & Docker Compose (recommended for PostgreSQL)
+
+### 2. Clone & Environment Setup
+
 ```bash
-# 1. Clone the repository
+# Clone the repository
 git clone <repo-url> && cd MonVoyage
 
-# 2. Create and activate a virtual environment
+# Create and activate Python virtual environment
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# 3. Install dependencies
+# Install all dependencies
 pip install -r requirements.txt
-
-# 4. Configure environment
-cp backend/.env.example backend/.env
-# Edit backend/.env and add your GEMINI_KEY
-
-# 5. Start the server
-python3 backend/app.py
 ```
 
-Open http://localhost:8000 for the chat UI, or http://localhost:8000/docs for the API reference.
+### 3. Database Preparation (PostgreSQL + Airflow)
+
+#### Prerequisites
+
+- Docker Desktop installed and running
+- `docker compose` available
+- `curl` and `psql` (optional but helpful)
+
+#### Getting Started
+
+**1. Build and start all services:**
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+**2. Verify containers are running:**
+
+```bash
+docker compose -f docker-compose.dev.yml ps
+```
+
+Expected containers: `airflow-webserver`, `airflow-scheduler`, `airflow-postgres`, `appdb`, `chroma`.
+
+#### Create Airflow Admin User and Initialize Database
+
+**1. Create admin user for Airflow:**
+
+```bash
+docker compose -f docker-compose.dev.yml exec airflow-webserver bash -lc '
+airflow users create \
+  --username admin \
+  --password admin \
+  --firstname Admin \
+  --lastname User \
+  --role Admin \
+  --email admin@example.com
+'
+```
+
+**2. Seed venue data:**
+
+```bash
+docker compose -f docker-compose.dev.yml exec airflow-webserver bash -lc \
+"python /opt/airflow/dags/lib/seed_tracked_sites.py"
+```
+
+#### Launch Airflow UI
+
+Open http://localhost:8080/home and login with `admin` / `admin`.
+
+The `website_change_monitor` DAG will begin scraping venues into the database.
+
+#### Verify Database Setup
+
+**1. Access the database:**
+
+```bash
+docker compose -f docker-compose.dev.yml exec appdb psql -U app -d app
+```
+
+**2. View tables:**
+
+```sql
+\dt
+```
+
+**3. Query places (venues):**
+
+```sql
+SELECT id, place_key, canonical_name, category FROM places;
+```
+
+**4. Query tracked pages (websites being monitored):**
+
+```sql
+SELECT id, place_id, url, page_type, extract_strategy, enabled FROM tracked_pages;
+```
+
+**5. Query snapshots (latest scraped data):**
+
+```sql
+SELECT id, tracked_page_id, content_hash, checked_at FROM page_snapshots ORDER BY checked_at DESC LIMIT 5;
+```
+
+**6. Exit psql:**
+
+```sql
+\q
+```
+
+### 4. Backend Configuration
+
+```bash
+# Copy environment template
+cp backend/.env.example backend/.env
+
+# Edit backend/.env with your API keys
+```
+
+**Required in `.env`:**
+- `GEMINI_KEY`: Get from https://aistudio.google.com/apikey
+- `GROQ_API_KEY` (optional fallback): Get from https://console.groq.com/keys
+
+**Optional database settings:**
+- `APP_DB_URL`: Database connection string (default: `postgresql+psycopg2://app:app@localhost:5432/app`)
+
+### 5. Start Backend Server
+
+```bash
+# From the MonVoyage directory
+python backend/app.py
+```
+
+Backend runs at **http://localhost:8000** with:
+- Chat UI: http://localhost:8000/
+- API Docs (Swagger): http://localhost:8000/docs
+- API Docs (ReDoc): http://localhost:8000/redoc
+
+### 6. Frontend Setup (Optional)
+
+The built-in frontend at `http://localhost:8000/` is served from `frontend/index.html`.
+
+For development with hot reload:
+
+```bash
+cd frontend
+
+# Install Node.js dependencies (if package.json exists)
+npm install
+
+# Start Vite dev server
+npm run dev
+```
+
+Frontend will be at http://localhost:5173 in development mode.
+
+---
+
+## Detailed Setup Guides
+
+### Database Setup Guide
+
+#### What the Database Stores
+
+The PostgreSQL database (managed by Airflow) stores:
+- **places**: Venues (restaurants, museums, hotels, etc.)
+- **tracked_pages**: Websites being scraped daily
+- **page_snapshots**: Historical web page data
+- **place_facts**: Venue attributes (address, hours, price, etc.)
+- **change_events**: Change detection logs
+
+#### Initialization Steps
+
+```bash
+# 1. Ensure PostgreSQL is running
+docker-compose -f docker-compose.dev.yml up -d postgres
+
+# 2. Initialize Airflow database schema
+cd airflow
+airflow db resetdb  # Reset if needed, or just: airflow db init
+
+# 3. Create Airflow admin account
+airflow users create \
+  --username admin \
+  --password admin \
+  --firstname Admin \
+  --lastname User \
+  --role Admin \
+  --email admin@example.com
+
+# 4. Seed initial venue data
+python dags/lib/seed_tracked_sites.py
+
+# 5. Verify database connection
+python -c "
+import sys
+sys.path.insert(0, 'dags/lib')
+from database import get_db_session
+session = get_db_session()
+print('✅ Database connected')
+session.close()
+"
+```
+
+#### Connection String Format
+
+```
+postgresql+psycopg2://username:password@host:port/database
+
+# Example:
+postgresql+psycopg2://app:app@localhost:5432/app
+```
+
+### Backend Setup Guide
+
+#### Environment Variables
+
+Create `backend/.env` based on `backend/.env.example`:
+
+```env
+# Required
+GEMINI_KEY=your_gemini_api_key_here
+GROQ_API_KEY=your_groq_api_key_here  # Optional fallback
+
+# Optional - API Configuration
+GROQ_MODEL=openai/gpt-oss-120b
+GEMINI_MODEL=gemini-3-flash-preview
+GROQ_TIMEOUT=60
+GEMINI_TIMEOUT=60
+GEMINI_MAX_RETRIES=3
+
+# Optional - Server
+HOST=127.0.0.1
+PORT=8000
+DEBUG=True
+
+# Optional - Database
+APP_DB_URL=postgresql+psycopg2://app:app@localhost:5432/app
+
+# Optional - Defaults
+DEFAULT_CITY=Toronto
+DEFAULT_COUNTRY=Canada
+EXTRACTION_TEMPERATURE=0.2
+ITINERARY_TEMPERATURE=0.7
+```
+
+#### Starting the Backend
+
+```bash
+# Basic
+python backend/app.py
+
+# With verbose logging
+DEBUG=True python backend/app.py
+
+# With custom port
+PORT=9000 python backend/app.py
+
+# Using gunicorn for production (install: pip install gunicorn)
+gunicorn -w 4 -b 0.0.0.0:8000 backend.app:app
+```
+
+#### Health Check
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+Expected response:
+```json
+{
+  "status": "healthy",
+  "service": "MonVoyage Trip Planner",
+  "model": "gemini-3-flash-preview",
+  "nlp_service_ready": true,
+  "error": null
+}
+```
+
+### Frontend Setup Guide
+
+#### Development (With Hot Reload)
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Start dev server
+npm run dev
+```
+
+Frontend will be at **http://localhost:5173** with hot reload enabled.
+
+#### Production Build
+
+```bash
+cd frontend
+
+# Install dependencies (if needed)
+npm install
+
+# Build optimized bundle
+npm run build
+
+# Serve from backend (app.py serves index.html automatically)
+```
+
+#### File Structure
+
+```
+frontend/
+├── index.html          # Main entry point (served by FastAPI)
+├── src/
+│   ├── main.jsx        # React component root
+│   ├── App.jsx         # Main app component
+│   └── components/     # React components
+├── package.json        # NPM dependencies
+└── vite.config.js      # Vite configuration
+```
+
+#### Customization
+
+Edit `frontend/index.html` and components in `frontend/src/` to customize the chat UI appearance and behavior.
+
+#### Connection to Backend
+
+The frontend connects to the backend API at:
+- Development: `http://localhost:8000`
+- Production: Same origin (automatic via relative URLs)
+
+---
+
+## Complete Startup Sequence
+
+### One Command: Start Everything
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+This starts PostgreSQL, Airflow, and Chroma simultaneously.
+
+### Multi-Terminal Setup (Alternative)
+
+#### Terminal 1: Start all Docker services
+
+```bash
+docker compose -f docker-compose.dev.yml up
+```
+
+Services start at:
+- Airflow UI: http://localhost:8080
+- Postgres: localhost:5432
+- Chroma: http://localhost:8000
+
+#### Terminal 2: Initialize Airflow (one-time only)
+
+```bash
+# Create admin user
+docker compose -f docker-compose.dev.yml exec airflow-webserver bash -lc '
+airflow users create \
+  --username admin \
+  --password admin \
+  --firstname Admin \
+  --lastname User \
+  --role Admin \
+  --email admin@example.com
+'
+
+# Seed venue data
+docker compose -f docker-compose.dev.yml exec airflow-webserver bash -lc \
+"python /opt/airflow/dags/lib/seed_tracked_sites.py"
+```
+
+#### Terminal 3: Backend Server
+
+```bash
+python backend/app.py
+```
+
+Backend runs at **http://localhost:8000**.
+
+#### Terminal 4 (Optional): Frontend Dev Server
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend runs at **http://localhost:5173** (with hot reload).
+
+### Access Points
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| **Chat UI** | http://localhost:8000 | — |
+| **API Docs** | http://localhost:8000/docs | — |
+| **Airflow** | http://localhost:8080 | admin/admin |
+| **Frontend Dev** | http://localhost:5173 | — |
 
 ## Architecture
 
@@ -225,21 +609,26 @@ curl -X POST http://localhost:8000/api/generate-itinerary \
 
 The Airflow pipeline scrapes venue websites daily and stores structured data in PostgreSQL. The FastAPI backend reads this data to inject real venues into AI-generated itineraries.
 
-### Setup
+### Quick Setup
+
+Detailed setup instructions are in the **Database Setup Guide** above. Quick reference:
 
 ```bash
-# 1. Start PostgreSQL
+# 1. Start PostgreSQL (Docker)
 docker-compose -f docker-compose.dev.yml up -d postgres
 
-# 2. Seed venues for your target city
-python airflow/dags/lib/seed_tracked_sites.py
+# 2. Initialize Airflow & seed venues
+cd airflow
+airflow db init
+airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com
+python dags/lib/seed_tracked_sites.py
 
-# 3. Start Airflow
-airflow standalone
-
-# 4. Enable the DAG in the Airflow UI
-# Navigate to http://localhost:8080 and toggle "website_change_monitor"
+# 3. Start Airflow services
+airflow scheduler &
+airflow webserver --port 8080
 ```
+
+Access Airflow UI at http://localhost:8080 to monitor DAG runs.
 
 ### How It Works
 
