@@ -1,0 +1,107 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-primary);
+  border-left: 1px solid var(--border-light);
+  box-shadow: var(--shadow-panel);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  overflow: hidden;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: var(--space-xl);
+}
+
+.emptyText {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+  max-width: 220px;
+  line-height: 1.7;
+}
+
+.header {
+  padding: var(--space-lg) var(--space-lg) var(--space-md);
+}
+
+.title {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-sm) var(--space-lg) var(--space-md);
+}
+
+.warnings {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--coral-light);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--coral);
+}
+
+.warningItem {
+  font-size: var(--text-xs);
+  color: var(--coral);
+  padding: var(--space-xs) 0;
+}
+
+.issues {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: rgba(224, 82, 99, 0.06);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--color-error);
+}
+
+.issueItem {
+  font-size: var(--text-xs);
+  color: var(--color-error);
+  padding: var(--space-xs) 0;
+}
+
+.footer {
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--border-light);
+}
+
+.generateBtn {
+  width: 100%;
+  padding: 12px var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-light);
+  background: var(--teal-light);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: not-allowed;
+  transition: all 0.2s;
+}
+
+.generateBtn.ready {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: white;
+  cursor: pointer;
+  box-shadow: 0 3px 12px var(--teal-glow);
+}
+
+.generateBtn.ready:hover:not(:disabled) {
+  background: var(--teal-dark);
+  transform: translateY(-1px);
+  box-shadow: 0 5px 16px var(--teal-glow);
+}
+
+.generateBtn:disabled {
+  opacity: 0.6;
+}

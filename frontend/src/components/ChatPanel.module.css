@@ -1,0 +1,58 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: linear-gradient(170deg, #eaf7f4 0%, #faf6f0 40%, #fdf0e3 100%);
+}
+
+/* Header */
+.header {
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(12px);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logoCircle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--teal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px var(--teal-glow);
+}
+
+.logoTextWrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.logoName {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.logoSub {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+/* Messages */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-lg);
+}

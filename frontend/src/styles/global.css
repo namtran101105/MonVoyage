@@ -1,0 +1,141 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap');
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  /* ── Tropical palette ── */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7fafa;
+  --bg-tertiary: #eef6f6;
+  --bg-input: #ffffff;
+  --bg-chat: linear-gradient(170deg, #eaf7f4 0%, #faf6f0 40%, #fdf0e3 100%);
+
+  /* Borders */
+  --border-light: #e8eded;
+  --border-medium: #d0dfdf;
+  /* keep legacy aliases for untouched child components */
+  --border-primary: #e8eded;
+  --border-secondary: #d0dfdf;
+
+  /* Text */
+  --text-primary: #1a2f3a;
+  --text-secondary: #6b8a97;
+  --text-muted: #9cb5bf;
+  --text-inverse: #ffffff;
+
+  /* Accent – Teal */
+  --teal: #1A8A7D;
+  --teal-dark: #0D7377;
+  --teal-light: #e0f2f0;
+  --teal-glow: rgba(26, 138, 125, 0.15);
+  /* Legacy aliases */
+  --accent-primary: var(--teal);
+  --accent-primary-hover: var(--teal-dark);
+  --accent-tertiary: #2A9D8F;
+
+  /* Accent – Coral */
+  --coral: #FF6B4A;
+  --coral-hover: #E85A3A;
+  --coral-light: #fff0ec;
+  --coral-glow: rgba(255, 107, 74, 0.15);
+  --accent-secondary: var(--coral);
+  --accent-secondary-hover: var(--coral-hover);
+
+  /* Accent – Sky */
+  --sky: #4A9FD9;
+  --sky-light: #e8f4fd;
+
+  /* Semantic */
+  --color-success: #2A9D8F;
+  --color-warning: #FF7B54;
+  --color-error: #e05263;
+  --color-info: #0096C7;
+
+  /* Category colors */
+  --tag-food: #FF7B54;
+  --tag-entertainment: #e879a8;
+  --tag-culture: #8b7ec8;
+  --tag-sport: #0096C7;
+  --tag-nature: #2A9D8F;
+  --tag-museums: #8b7ec8;
+  --tag-waterfront: #0096C7;
+  --tag-other: #93adb8;
+
+  /* Spacing */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.08);
+  --shadow-panel: -4px 0 24px rgba(0, 0, 0, 0.04);
+
+  /* Typography */
+  --font-sans: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2rem;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-chat);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100%;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-medium); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Selection */
+::selection {
+  background: var(--teal);
+  color: var(--text-inverse);
+}
+
+/* Links */
+a { color: var(--teal); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Focus visible */
+:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}

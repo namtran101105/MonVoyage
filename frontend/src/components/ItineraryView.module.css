@@ -1,0 +1,107 @@
+.container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  animation: fadeIn 0.4s ease-out;
+  background: linear-gradient(170deg, #eaf7f4 0%, #faf6f0 40%, #fdf0e3 100%);
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-lg) var(--space-xl);
+  border-bottom: 1px solid var(--border-light);
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(12px);
+  flex-shrink: 0;
+}
+
+.tripInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.title {
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.subtitle {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.backBtn {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-medium);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.backBtn:hover {
+  background: var(--bg-tertiary);
+}
+
+.resetBtn {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--teal);
+  background: var(--teal);
+  color: white;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  box-shadow: 0 2px 8px var(--teal-glow);
+}
+
+.resetBtn:hover {
+  background: var(--teal-dark);
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-xl);
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.days {
+  display: flex;
+  flex-direction: column;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (max-width: 768px) {
+  .topBar {
+    flex-direction: column;
+    gap: var(--space-md);
+    align-items: flex-start;
+    padding: var(--space-md);
+  }
+
+  .content {
+    padding: var(--space-md);
+  }
+}

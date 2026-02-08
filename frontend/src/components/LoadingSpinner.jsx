@@ -1,0 +1,11 @@
+import styles from "./LoadingSpinner.module.css";
+
+export default function LoadingSpinner() {
+  return (
+    <div className={styles.container}>
+      <span className={styles.dot} />
+      <span className={styles.dot} />
+      <span className={styles.dot} />
+    </div>
+  );
+}
