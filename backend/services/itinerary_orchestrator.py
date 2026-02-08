@@ -81,7 +81,7 @@ _PACE_PATTERN = re.compile(
 # ── Itinerary system prompt (extended with weather context) ───────────
 
 ITINERARY_SYSTEM_PROMPT_TEMPLATE = """\
-You are a Toronto travel itinerary generator. You MUST ONLY use venues from \
+You are a travel itinerary generator. You MUST ONLY use venues from \
 the venue list below. This is a hard constraint — do NOT invent venues.
 
 VENUE LIST — START
@@ -132,12 +132,13 @@ class ItineraryOrchestrator:
             logger.warning("WeatherService init failed: %s", exc)
             self.weather_service = None
 
-        # Budget — uses Airbnb scraping + hardcoded flight prices, no key
-        try:
-            self.budget_service: Optional[TripBudgetService] = TripBudgetService()
-        except Exception as exc:
-            logger.warning("TripBudgetService init failed: %s", exc)
-            self.budget_service = None
+        # Budget — DISABLED FOR MVP (budget is now optional)
+        # try:
+        #     self.budget_service: Optional[TripBudgetService] = TripBudgetService()
+        # except Exception as exc:
+        #     logger.warning("TripBudgetService init failed: %s", exc)
+        #     self.budget_service = None
+        self.budget_service = None  # Explicitly disabled for MVP
 
         # Google Maps — requires GOOGLE_MAPS_API_KEY; graceful if missing
         try:
@@ -190,13 +191,14 @@ class ItineraryOrchestrator:
         preferences = self._extract_preferences_from_history(messages)
         logger.info("Extracted preferences: %s", preferences.to_dict())
 
-        # ── State D.1: parallel enrichment fetch ─────────────────────
-        weather_result, budget_result, venues = await asyncio.gather(
+        # ── State D.1: parallel enrichment fetch (budget disabled for MVP) ─────────────────────
+        weather_result, venues = await asyncio.gather(
             self._fetch_weather(loop, preferences),
-            self._fetch_budget(loop, preferences),
-            self._fetch_venues(loop),
+            self._fetch_venues(loop, preferences.city),
             return_exceptions=True,
         )
+        # Budget is disabled for MVP
+        budget_result = None
 
         # Unwrap exceptions from gather
         if isinstance(weather_result, BaseException):
@@ -231,11 +233,15 @@ class ItineraryOrchestrator:
         for m in messages:
             if m["role"] != "system":
                 itinerary_messages.append(m)
+        
+        # Build dynamic city reference for user message
+        city_name = preferences.city if preferences.city else "the destination"
+        
         itinerary_messages.append(
             {
                 "role": "user",
                 "content": (
-                    "Please generate my Toronto itinerary now based on "
+                    f"Please generate my {city_name} itinerary now based on "
                     "everything I told you. Use ONLY venues from the venue "
                     "list and include Source citations on every line."
                 ),
@@ -250,7 +256,7 @@ class ItineraryOrchestrator:
         )
 
         # ── State D.3: route enrichment (post-LLM) ──────────────────
-        route_data = await self._fetch_routes(loop, itinerary_text)
+        route_data = await self._fetch_routes(loop, itinerary_text, preferences)
 
         # ── State E: assemble response ───────────────────────────────
         weather_summary = self._format_weather_summary(weather_result)
@@ -312,7 +318,35 @@ class ItineraryOrchestrator:
                     if month_num:
                         start_date = f"{year}-{month_num:02d}-{int(m.group('d1')):02d}"
                         end_date = f"{year}-{month_num:02d}-{int(m.group('d2')):02d}"
-
+        # -- City and Country ------------------------------------------------
+        city: Optional[str] = None
+        country: Optional[str] = None
+        
+        # Try to extract city/country from conversation
+        # Look for patterns like "visiting Paris", "trip to London", "traveling to Tokyo"
+        city_patterns = [
+            r"(?:visit|visiting|trip to|traveling to|travel to|going to|go to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+            r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+trip",
+            r"in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        ]
+        
+        for pattern in city_patterns:
+            match_obj = re.search(pattern, combined)
+            if match_obj:
+                potential_city = match_obj.group(1).strip()
+                # Simple filter: skip common non-city words
+                if potential_city.lower() not in ["march", "april", "may", "june", "july", "august", 
+                                                    "september", "october", "november", "december",
+                                                    "relaxed", "moderate", "packed", "weekend"]:
+                    city = potential_city
+                    break
+        
+        # Try to extract country (look for pattern like "Paris, France" or "in France")
+        if city:
+            country_pattern = rf"{city}(?:,\s*|\sin\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)"
+            country_match = re.search(country_pattern, combined)
+            if country_match:
+                country = country_match.group(1).strip()
         # -- Budget ----------------------------------------------------------
         for bm in _BUDGET_PATTERN.finditer(combined):
             raw = (bm.group("amount") or bm.group("amount2") or "").replace(",", "")
@@ -348,17 +382,17 @@ class ItineraryOrchestrator:
                 pass
 
         return TripPreferences(
-            city="Toronto",
-            country="Canada",
+            city=city,           # Use extracted city
+            country=country,     # Use extracted country
             start_date=start_date,
             end_date=end_date,
             duration_days=duration_days,
             budget=budget,
             budget_currency="CAD",
-            interests=interests if interests else ["Culture and History"],
+            interests=interests if interests else [],
             pace=pace or "moderate",
-            location_preference="downtown Toronto",
-            booking_type="none",      # Toronto-only MVP — no transport booking
+            location_preference=f"downtown {city}" if city else "downtown",
+            booking_type="none",
             source_location=None,
         )
 
@@ -403,18 +437,26 @@ class ItineraryOrchestrator:
             return None
 
     async def _fetch_venues(
-        self, loop: asyncio.AbstractEventLoop,
+        self, 
+        loop: asyncio.AbstractEventLoop,
+        city: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Fetch Toronto venues (DB or fallback). Always returns a list."""
+        """Fetch venues for the specified city (DB or fallback). Always returns a list."""
+        if not city:
+            city = "Toronto"  # Default fallback
+            
         if self.venue_service:
             try:
                 venues = await loop.run_in_executor(
-                    None, self.venue_service.get_toronto_venues,
+                    None, 
+                    lambda: self.venue_service.get_all_venues_for_city(city, limit=50),
                 )
                 if venues:
                     return venues
             except Exception as exc:
-                logger.warning("VenueService.get_toronto_venues failed: %s", exc)
+                logger.warning("VenueService.get_all_venues_for_city failed for %s: %s", city, exc)
+        
+        # Fallback to Toronto venues if DB query fails or no venues found
         return list(TORONTO_FALLBACK_VENUES)
 
     async def _call_llm(
@@ -479,6 +521,7 @@ class ItineraryOrchestrator:
         self,
         loop: asyncio.AbstractEventLoop,
         itinerary_text: str,
+        preferences: TripPreferences,
     ) -> Optional[List[Dict[str, Any]]]:
         """Extract venue names from itinerary text and fetch routes."""
         if not self.maps_service or not self.maps_service.is_available():
@@ -489,10 +532,14 @@ class ItineraryOrchestrator:
             return None
 
         try:
+            # Get city and country from preferences for route calculation
+            city = preferences.city or "Unknown City"
+            country = preferences.country or "Unknown Country"
+            
             routes = await loop.run_in_executor(
                 None,
                 lambda: self.maps_service.get_itinerary_routes(
-                    venue_names, city="Toronto", country="Canada", mode="transit"
+                    venue_names, city=city, country=country, mode="transit"
                 ),
             )
             return routes if routes else None
@@ -508,20 +555,32 @@ class ItineraryOrchestrator:
     def _build_weather_context(
         weather_result: Optional[Dict[str, Any]],
     ) -> str:
-        """Build optional weather context block for the LLM prompt."""
+        """Build day-by-day weather context for the LLM prompt."""
         if not weather_result or not weather_result.get("forecasts"):
             return "\n"
 
-        lines = ["\n\nWEATHER FORECAST — consider these conditions when planning activities:"]
+        lines = [
+            "\n\nDAILY WEATHER FORECAST (CRITICAL - integrate into each day's planning):"
+        ]
         for f in weather_result["forecasts"]:
+            rain_notice = " [HIGH RAIN - prioritize indoor venues]" if f.get("precipitation_chance", 0) > 50 else ""
+            cold_notice = " [COLD - mention warm clothing]" if f.get("temp_max_c", 20) < 5 else ""
             lines.append(
                 f"  {f['date']}: {f['condition']}, "
                 f"{f['temp_min_c']}°C to {f['temp_max_c']}°C, "
-                f"precipitation {f['precipitation_chance']}%"
+                f"precipitation {f['precipitation_chance']}%{rain_notice}{cold_notice}"
             )
         lines.append(
-            "If rain is likely (>50%), prefer indoor venues. "
-            "If cold (<5°C), mention dressing warmly.\n"
+            "\nIMPORTANT: For each day in your itinerary, consider that day's specific weather:"
+        )
+        lines.append(
+            "- If rain likely (>50%), choose indoor venues from the database (museums, indoor attractions)."
+        )
+        lines.append(
+            "- If sunny and warm, outdoor venues are great."
+        )
+        lines.append(
+            "- If cold (<5°C), mention wearing warm layers in your activity notes.\n"
         )
         return "\n".join(lines)
 

@@ -102,7 +102,7 @@ async def test_all_services():
         
         # Test conversation
         print("\nTesting conversation with Groq...")
-        messages, response, phase, still_need = await conversation_service.turn(
+        messages, response, phase, still_need, enrichment = await conversation_service.turn(
             messages=[],
             user_input=None
         )
@@ -110,7 +110,7 @@ async def test_all_services():
         print(f"Response preview: {response[:100]}...")
         
         # Test multi-turn
-        messages, response, phase, still_need = await conversation_service.turn(
+        messages, response, phase, still_need, enrichment = await conversation_service.turn(
             messages=messages,
             user_input="I want to visit Toronto from March 15-17"
         )

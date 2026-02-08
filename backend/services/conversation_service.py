@@ -1,6 +1,6 @@
 """
-Conversation service — manages the full multi-turn chat lifecycle for the
-Toronto-only itinerary MVP.
+Conversation service — manages the full multi-turn chat lifecycle for
+itinerary planning.
 
 Phases:
     1. greeting   — first response; warm welcome + ask for trip details
@@ -43,40 +43,43 @@ TurnResult = Tuple[
 # ---------------------------------------------------------------------------
 
 INTAKE_SYSTEM_PROMPT = """\
-You are a friendly, human-like Toronto travel assistant. Your job is to \
+You are a friendly, human-like travel assistant. Your job is to \
 collect the traveller's trip details through a natural multi-turn conversation.
-
-City is ALWAYS Toronto, Canada — do not ask which city.
 
 Rules you MUST follow:
 1. Your FIRST response must be a warm greeting and a short request for trip \
-details (dates, budget, interests, pace).
+details (destination city/country, dates, interests, pace).
 2. After each user message, acknowledge what you understood in ONE natural \
 sentence, then ask ONLY for the next missing piece.
 3. NEVER mention internal mechanics — no "database", "AI", "Airflow", \
 "pipeline", "extracted", "slots", "parameters", or "JSON".
 4. Keep responses concise: 1-3 short paragraphs, conversational tone.
 5. Do NOT repeat the same template sentence across turns.
+6. Do NOT show "Still need:" or any internal debug information to users.
 
 Required fields (collect ALL before confirming):
+- Destination city (which city to visit)
+- Country (which country that city is in)
 - Travel dates (start date + end date, OR start date + number of days)
-- Budget (total amount in CAD)
-- Interests (at least one: e.g. museums, food, nature, sports, nightlife, \
-culture, entertainment)
 - Pace (relaxed, moderate, or packed)
 
-After EVERY response, add this line at the very end on its own line:
-Still need: <comma-separated list of fields still missing>
+Optional fields (nice to have, but not required):
+- Interests (e.g. museums, food, nature, sports, nightlife, culture, entertainment)
+  If not provided, create a balanced diverse itinerary
+- Location preference (where to stay: downtown, waterfront, etc.)
+- Booking assistance (flights, accommodation, or both)
+  If user wants booking help, ask where they're traveling from
 
-If ALL four fields are collected, instead of "Still need:" write EXACTLY:
-"Awesome — I have everything I need! Want me to generate your Toronto \
-itinerary now?"
+Budget is OPTIONAL - do not ask about it unless user brings it up.
+
+When you have city/country/dates/pace, ask:
+"Great! I have everything I need. Want me to create your personalized [City] itinerary?"
 
 Do NOT generate the itinerary until the user explicitly confirms.\
 """
 
 ITINERARY_SYSTEM_PROMPT_TEMPLATE = """\
-You are a Toronto travel itinerary generator. You MUST ONLY use venues from \
+You are a travel itinerary generator. You MUST ONLY use venues from \
 the venue list below. This is a hard constraint — do NOT invent venues.
 
 VENUE LIST — START
@@ -121,7 +124,7 @@ _AFFIRMATIVE_PATTERNS = re.compile(
 )
 
 # Phrase the assistant uses when all fields are collected
-_CONFIRMATION_MARKER = "generate your Toronto itinerary"
+_CONFIRMATION_MARKER = "generate your itinerary"
 
 
 class ConversationService:
@@ -205,13 +208,13 @@ class ConversationService:
     def _greeting(self) -> TurnResult:
         """Return a warm greeting without calling the LLM."""
         greeting = (
-            "Hey there! Welcome to the Toronto Trip Planner! "
-            "I'd love to help you put together a great Toronto itinerary. "
+            "Hey there! Welcome to the Trip Planner! "
+            "I'd love to help you put together a great travel itinerary. "
             "To get started, could you tell me a bit about your trip? "
-            "Things like when you're planning to visit, your budget, "
+            "Things like where you're planning to visit (city and country), "
+            "when you're traveling, "
             "what kinds of activities you enjoy, and whether you'd like "
-            "a relaxed, moderate, or packed schedule?\n\n"
-            "Still need: travel dates, budget, interests, pace"
+            "a relaxed, moderate, or packed schedule?"
         )
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": INTAKE_SYSTEM_PROMPT},
@@ -221,7 +224,7 @@ class ConversationService:
             messages,
             greeting,
             "greeting",
-            ["travel dates", "budget", "interests", "pace"],
+            ["city", "country", "travel dates", "pace"],  # City and country now required
             None,  # no enrichment
         )
 
@@ -326,11 +329,30 @@ class ConversationService:
 
         # ── Legacy path (no orchestrator) ─────────────────────────────
         loop = asyncio.get_running_loop()
+        
+        # Extract city from conversation for dynamic venue fetching
+        city = None
+        for msg in messages:
+            if msg["role"] == "user":
+                content = msg["content"].lower()
+                # Simple extraction - look for common patterns
+                import re
+                city_match = re.search(r'(?:visit|visiting|trip to|going to)\s+([A-Z][a-zA-Z\s]+?)(?:\s|,|\.|\?|!|$)', msg["content"])
+                if city_match:
+                    city = city_match.group(1).strip()
+                    break
+        
+        if not city:
+            city = "Toronto"  # Default fallback
+        
         if self.venue_service:
             venues = await loop.run_in_executor(
-                None, self.venue_service.get_toronto_venues,
+                None, 
+                lambda: self.venue_service.get_all_venues_for_city(city, limit=50),
             )
-        else:
+        
+        # Fallback to Toronto venues if query fails or returns empty
+        if not venues:
             from services.venue_service import TORONTO_FALLBACK_VENUES
             venues = list(TORONTO_FALLBACK_VENUES)
 
@@ -346,11 +368,15 @@ class ConversationService:
         for m in messages:
             if m["role"] != "system":
                 itinerary_messages.append(m)
+        
+        # Build dynamic message using extracted city
+        city_ref = city if city and city != "Toronto" else "my"
+        
         itinerary_messages.append(
             {
                 "role": "user",
                 "content": (
-                    "Please generate my Toronto itinerary now based on "
+                    f"Please generate {city_ref} itinerary now based on "
                     "everything I told you. Use ONLY venues from the venue "
                     "list and include Source citations on every line."
                 ),

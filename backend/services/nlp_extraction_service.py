@@ -67,7 +67,7 @@ class NLPExtractionService:
         Extract the following information when available:
         - City and country (if mentioned)
         - Travel dates (start_date, end_date in YYYY-MM-DD format, or duration_days)
-        - Budget (single value in CAD)
+        - Budget (OPTIONAL - single value in CAD)
         - Interests: Classify into EXACTLY these 5 categories (use only these names):
           * "Food and Beverage" — restaurants, cafes, food tours, breweries, wine, street food, dining, etc.
           * "Entertainment" — shopping, casino, spa, bar, pub, arcade, nightlife, cinema, concerts, zoo, aquarium, etc.
@@ -76,7 +76,10 @@ class NLPExtractionService:
           * "Natural Place" — national parks, beaches, lakes, fishing, diving, trekking, hiking, mountains, gardens, waterfalls, etc.
           Only include categories the user actually mentions or implies. Return as an array of category names.
         - Pace of travel (relaxed, moderate, packed). Synonyms: relax/chill/slow/leisurely/easy → "relaxed", balanced/normal/steady → "moderate", fast/rush/busy/intense/active → "packed"
-        - Location preference for drop-off or stay (e.g., "downtown", "near nature", "historic district")
+        - Location preference for drop-off or stay (e.g., "downtown", "near nature", "historic district", or "flexible")
+        - Booking needs:
+          * booking_type: "accommodation" (hotel/airbnb), "transportation" (flights/buses), "both", or "none"
+          * source_location: Where user is traveling from (only if they mention booking flights or want transportation)
 
         Rules:
         1. Only extract information explicitly mentioned or strongly implied
@@ -87,10 +90,16 @@ class NLPExtractionService:
            - Season: Store as "season YYYY" (e.g., "winter" → "winter 2026", "summer 2024" → "summer 2024")
            - Flexible: If user says "flexible", "anytime", "not sure yet" → set start_date to "flexible"
            - Duration: Extract number of days/weeks (e.g., "5 days" → duration_days: 5, "2 weeks" → duration_days: 14)
-        4. For budget, extract a single value (if a range is given, use the midpoint or maximum)
+        4. For budget, extract a single value (if a range is given, use the midpoint or maximum). Budget is OPTIONAL.
         5. For interests, classify into the 5 categories listed above. Return only the matching category names, not the raw activities
-        6. Be conservative - better to leave something null than to guess incorrectly
-        7. Return valid JSON only, no additional text"""
+        6. For booking_type, detect:
+           - "accommodation": mentions hotel, airbnb, place to stay, accommodation, lodging, where to stay
+           - "transportation": mentions flights, plane, fly, bus, train, getting there, travel to
+           - "both": mentions both accommodation and transportation
+           - "none" or null: doesn't mention booking needs
+        7. For source_location, extract city/airport when user mentions: "from [city]", "coming from [city]", "traveling from [city]", "live in [city]"
+        8. Be conservative - better to leave something null than to guess incorrectly
+        9. Return valid JSON only, no additional text"""
 
     def _build_extraction_prompt(self, user_input: str) -> str:
         """
@@ -108,11 +117,13 @@ class NLPExtractionService:
             "start_date": "string or null (YYYY-MM-DD)",
             "end_date": "string or null (YYYY-MM-DD)",
             "duration_days": "integer or null",
-            "budget": "number or null",
+            "budget": "number or null (OPTIONAL)",
             "budget_currency": "string (default: CAD)",
-            "interests": "array of strings — ONLY use these exact category names: 'Food and Beverage', 'Entertainment', 'Culture and History', 'Sport', 'Natural Place'",
+            "interests": "array of strings — ONLY use these exact category names: 'Food and Beverage', 'Entertainment', 'Culture and History', 'Sport', 'Natural Place'. Can be empty array.",
             "pace": "string or null (relaxed/moderate/packed). Map synonyms: relax/chill/slow/easy → relaxed, fast/rush/busy/intense → packed",
-            "location_preference": "string or null (e.g., downtown, near nature, historic district)"
+            "location_preference": "string or null (e.g., downtown, near nature, historic district, or 'flexible')",
+            "booking_type": "string or null ('accommodation', 'transportation', 'both', or 'none'). Extract from user mentioning hotels, flights, etc.",
+            "source_location": "string or null (city/airport user is traveling from, only if booking transportation mentioned)"
         }
 
         prompt = f"""Extract travel preferences from this user message:
@@ -127,6 +138,9 @@ class NLPExtractionService:
         - Use null for missing information
         - Return arrays as empty [] if no items are mentioned
         - Location: If user says "anywhere", "no preference", "flexible" → set location_preference to "flexible"
+        - Budget: OPTIONAL - only extract if mentioned
+        - Booking: Extract booking_type if user mentions hotels, flights, airbnb, accommodation, or transportation needs
+        - Source location: Only extract if user mentions where they're traveling from AND wants booking assistance
         - Dates:
           * Specific dates → "YYYY-MM-DD" format
           * Month only → "YYYY-MM" or "Month YYYY" format
@@ -298,9 +312,7 @@ class NLPExtractionService:
         if not preferences.pace:
             missing_fields.append("pace")
 
-        # Priority 6: Budget
-        if not preferences.budget:
-            missing_fields.append("budget")
+        # Budget is OPTIONAL for MVP - not checked
 
         missing_fields_str = ", ".join(missing_fields) if missing_fields else "None"
 
@@ -320,17 +332,18 @@ class NLPExtractionService:
         # Build prompt based on completeness
         if is_complete:
             # All preferences are filled - ask for simple confirmation
-            system_instruction = """You are a friendly travel planning assistant. Your role is to:
+            system_instruction = """You are a friendly travel assistant. Your role is to:
 1. Acknowledge that you have all the information needed
-2. Briefly confirm the key trip details (destination, dates, budget, interests, pace)
+2. Briefly confirm the key trip details (destination, dates, interests, pace)
 3. Ask ONLY for confirmation - a simple yes/no question
 4. Be warm, encouraging, and very concise (1-2 sentences max)
 5. Use a friendly tone
 
 Important:
 - Do NOT ask for more information - all preferences are complete
+- Do NOT mention budget - that's optional
 - Do NOT offer to add more details or make changes
-- Simple confirmation only: "Shall I proceed?", "Does this work for you?", "Ready to confirm?"
+- Simple confirmation only: "Want me to create your personalized itinerary?", "Ready for me to create your itinerary?"
 - Be positive and direct"""
 
             context_type = "refinement/update" if is_refinement else "initial message"
@@ -359,7 +372,27 @@ Example: "Perfect! I have your Kingston trip from Feb 15-17 with museum visits a
 Response:"""
         else:
             # Preferences incomplete - continue asking for missing info
-            system_instruction = """You are a friendly travel planning assistant collecting trip information.
+            system_instruction = """You are a friendly travel assistant helping plan a trip.
+
+Your job is to gather the essential details through natural conversation:
+1. City (which city to visit)
+2. Country (which country that city is in)
+3. Travel dates (when are you visiting?)
+4. Pace (how busy do you want each day? relaxed, moderate, or packed)
+5. Interests (OPTIONAL - what do you enjoy? food, culture, sports, nature, entertainment)
+6. Location preference (OPTIONAL - where would you like to stay? downtown, near parks, etc.)
+7. Booking needs (OPTIONAL - do you need help booking flights or accommodation?)
+8. Where from (OPTIONAL - if user wants flights, where are they traveling from?)
+
+Guidelines:
+- Be warm and conversational, not robotic
+- Ask ONE question at a time when information is missing  
+- If the user mentions interests, acknowledge them specifically
+- If interests are not mentioned, that's fine - we'll create a balanced mix
+- Budget is optional - don't ask about it unless user brings it up
+- If user mentions booking flights/hotels, ask where they're traveling from (for flight links)
+- Do NOT show internal fields like 'Still need: ...' - that's for debugging only
+- Do NOT mention processes like 'processing' or 'analyzing' - just respond naturally
 
 RULES:
 1. Acknowledge what the user just shared
@@ -370,24 +403,20 @@ RULES:
 
             context_type = "refinement/update" if is_refinement else "initial message"
 
-            # Determine the next field(s) to ask for based on priority
+            # Determine the next field(s) to ask for based on priority (budget removed)
             next_field_to_ask = None
             if "city" in missing_fields_str:
                 next_field_to_ask = "city (which city do you want to visit?)"
             elif "country" in missing_fields_str:
                 next_field_to_ask = "country (which country is that city in?)"
-            elif "location preference" in missing_fields_str:
-                next_field_to_ask = "location preference (optional - where in the city will you stay? e.g., downtown, near airport, or say 'flexible' if you don't have a preference)"
             elif "dates" in missing_fields_str:
                 next_field_to_ask = "dates (when will you travel? Please provide start date, end date, or duration)"
-            elif "interests" in missing_fields_str and "pace" in missing_fields_str:
-                next_field_to_ask = "interests and pace (what are you interested in? Choose from: Food & Beverage, Entertainment, Culture & History, Sport, or Natural Places. And what pace: relaxed, moderate, or packed?)"
-            elif "interests" in missing_fields_str:
-                next_field_to_ask = "interests (what are you interested in? Choose from: Food & Beverage, Entertainment, Culture & History, Sport, or Natural Places — or just describe what you enjoy!)"
             elif "pace" in missing_fields_str:
                 next_field_to_ask = "pace (what pace do you prefer for your trip: relaxed, moderate, or packed?)"
-            elif "budget" in missing_fields_str:
-                next_field_to_ask = "budget (what's your total or daily budget for this trip?)"
+            elif "interests" in missing_fields_str:
+                next_field_to_ask = "interests (OPTIONAL - what are you interested in? Choose from: Food & Beverage, Entertainment, Culture & History, Sport, or Natural Places — or just describe what you enjoy! You can also skip this if you want a balanced mix)"
+            elif "location preference" in missing_fields_str:
+                next_field_to_ask = "location preference (OPTIONAL - where in the city will you stay? e.g., downtown, near airport, or say 'flexible' if you don't have a preference)"
 
             prompt = f"""User just said: "{user_input}"
 
