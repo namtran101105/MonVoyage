@@ -12,9 +12,9 @@
   /* ── Tropical palette ── */
   --bg-primary: #ffffff;
   --bg-secondary: #f7fafa;
-  --bg-tertiary: #eef6f6;
+  --bg-tertiary: #eef2fb;
   --bg-input: #ffffff;
-  --bg-chat: linear-gradient(170deg, #eaf7f4 0%, #faf6f0 40%, #fdf0e3 100%);
+  --bg-chat: linear-gradient(170deg, #e0ecfd 0%, #faf6f0 40%, #fdf0e3 100%);
 
   /* Borders */
   --border-light: #e8eded;
@@ -29,15 +29,15 @@
   --text-muted: #9cb5bf;
   --text-inverse: #ffffff;
 
-  /* Accent – Teal */
-  --teal: #1A8A7D;
-  --teal-dark: #0D7377;
-  --teal-light: #e0f2f0;
-  --teal-glow: rgba(26, 138, 125, 0.15);
+  /* Accent – Blue */
+  --teal: #2563EB;
+  --teal-dark: #1D4ED8;
+  --teal-light: #DBEAFE;
+  --teal-glow: rgba(37, 99, 235, 0.15);
   /* Legacy aliases */
   --accent-primary: var(--teal);
   --accent-primary-hover: var(--teal-dark);
-  --accent-tertiary: #2A9D8F;
+  --accent-tertiary: #3B82F6;
 
   /* Accent – Coral */
   --coral: #FF6B4A;
@@ -52,7 +52,7 @@
   --sky-light: #e8f4fd;
 
   /* Semantic */
-  --color-success: #2A9D8F;
+  --color-success: #2563EB;
   --color-warning: #FF7B54;
   --color-error: #e05263;
   --color-info: #0096C7;

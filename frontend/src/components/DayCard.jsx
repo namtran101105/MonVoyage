@@ -13,7 +13,20 @@ function formatDate(dateStr) {
   });
 }
 
-export default function DayCard({ day }) {
+function weatherEmoji(condition) {
+  if (!condition) return "\u{1F324}\uFE0F";
+  const c = condition.toLowerCase();
+  if (c.includes("thunder")) return "\u26C8\uFE0F";
+  if (c.includes("snow") || c.includes("hail")) return "\u2744\uFE0F";
+  if (c.includes("rain") || c.includes("drizzle") || c.includes("shower")) return "\u{1F327}\uFE0F";
+  if (c.includes("fog") || c.includes("rime")) return "\u{1F32B}\uFE0F";
+  if (c.includes("overcast")) return "\u2601\uFE0F";
+  if (c.includes("cloudy") || c.includes("partly")) return "\u26C5";
+  if (c.includes("clear")) return "\u2600\uFE0F";
+  return "\u{1F324}\uFE0F";
+}
+
+export default function DayCard({ day, weather }) {
   // Merge activities and meals into a timeline sorted by start time
   const timelineItems = [];
 
@@ -33,13 +46,19 @@ export default function DayCard({ day }) {
           <span className={styles.dayNumber}>Day {day.day_number}</span>
           <span className={styles.date}>{formatDate(day.date)}</span>
         </div>
-        <div className={styles.budget}>
-          <span className={styles.budgetSpent}>
-            ${day.daily_budget_spent}
-          </span>
-          <span className={styles.budgetTotal}>
-            / ${day.daily_budget_allocated}
-          </span>
+        <div className={styles.weather}>
+          {weather ? (
+            <>
+              <span className={styles.weatherCondition}>
+                {weatherEmoji(weather.condition)} {weather.condition}
+              </span>
+              <span className={styles.weatherTemp}>
+                {weather.temp_min_c}° / {weather.temp_max_c}°C
+              </span>
+            </>
+          ) : (
+            <span className={styles.weatherTemp}>&mdash;</span>
+          )}
         </div>
       </div>
 

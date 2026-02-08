@@ -11,6 +11,11 @@ const categoryColors = {
   other: "var(--tag-other)",
 };
 
+function venueUrl(name) {
+  const q = new URLSearchParams({ api: "1", query: name });
+  return `https://www.google.com/maps/search/?${q}`;
+}
+
 export default function ActivityItem({ activity }) {
   const tagColor = categoryColors[activity.category] || "var(--tag-other)";
 
@@ -33,7 +38,16 @@ export default function ActivityItem({ activity }) {
             </span>
           )}
         </div>
-        <h4 className={styles.name}>{activity.venue_name}</h4>
+        <h4 className={styles.name}>
+          <a
+            href={venueUrl(activity.venue_name)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={styles.nameLink}
+          >
+            {activity.venue_name}
+          </a>
+        </h4>
         {activity.notes && <p className={styles.notes}>{activity.notes}</p>}
         <div className={styles.footer}>
           {activity.estimated_cost > 0 && (

@@ -5,7 +5,7 @@ import DayCard from "./DayCard";
 import styles from "./ItineraryView.module.css";
 
 export default function ItineraryView() {
-  const { itinerary, preferences, resetToChat, resetAll } = useTrip();
+  const { itinerary, preferences, weather, resetToChat, resetAll } = useTrip();
 
   if (!itinerary) return null;
 
@@ -43,7 +43,7 @@ export default function ItineraryView() {
 
         <div className={styles.days}>
           {itinerary.days.map((day) => (
-            <DayCard key={day.day_number} day={day} />
+            <DayCard key={day.day_number} day={day} weather={weather?.[day.date]} />
           ))}
         </div>
       </div>

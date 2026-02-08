@@ -16,6 +16,7 @@ import uvicorn
 sys.path.insert(0, os.path.dirname(__file__))
 
 from services.nlp_extraction_service import NLPExtractionService
+from services.weather_service import WeatherService
 from models.trip_preferences import TripPreferences
 from config.settings import settings
 
@@ -230,6 +231,36 @@ async def refine_preferences(request: RefineRequest):
 
     except HTTPException:
         raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/api/weather')
+async def get_weather(city: str, country: str = "", start_date: str = "", end_date: str = ""):
+    """Get weather forecast for a city and date range."""
+    if not city or not start_date or not end_date:
+        raise HTTPException(status_code=400, detail='city, start_date, and end_date are required')
+
+    try:
+        prefs = TripPreferences(
+            city=city,
+            country=country or "",
+            start_date=start_date,
+            end_date=end_date,
+            budget=100.0,
+            interests=["other"],
+            pace="moderate",
+        )
+        service = WeatherService()
+        result = service.get_trip_weather(prefs)
+
+        if result.get("error"):
+            return {"success": False, "forecasts": [], "error": result["error"]}
+
+        return {"success": True, "forecasts": result.get("forecasts", [])}
+
     except Exception as e:
         import traceback
         traceback.print_exc()

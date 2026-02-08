@@ -12,6 +12,25 @@
   background: var(--border-light);
 }
 
+.link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  margin: -4px -8px;
+  transition: background 0.15s;
+}
+
+.link:hover {
+  background: rgba(37, 99, 235, 0.06);
+  text-decoration: none;
+}
+
+.link:hover .detail {
+  color: var(--teal);
+}
+
 .content {
   display: flex;
   align-items: center;

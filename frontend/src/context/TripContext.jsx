@@ -4,6 +4,7 @@ import {
   extractPreferences,
   refinePreferences,
   generateItinerary as apiGenerateItinerary,
+  fetchWeather,
 } from "../api/tripApi";
 
 const TripContext = createContext(null);
@@ -16,6 +17,7 @@ export function TripProvider({ children }) {
   const [isExtracting, setIsExtracting] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [itinerary, setItinerary] = useState(null);
+  const [weather, setWeather] = useState(null);
   const [backendConnected, setBackendConnected] = useState(null);
 
   useEffect(() => {
@@ -80,13 +82,47 @@ export function TripProvider({ children }) {
       if (data.success) {
         setItinerary(data.itinerary);
         setPhase("itinerary");
+
+        // Extract fallback weather from itinerary days (mock data)
+        const days = data.itinerary.days;
+        const fallback = {};
+        for (const d of days) {
+          if (d.weather) fallback[d.date] = d.weather;
+        }
+
+        // Try fetching live weather from the API
+        if (days.length > 0) {
+          const city = preferences?.city || "Kingston";
+          const country = preferences?.country || "Canada";
+          const startDate = days[0].date;
+          const endDate = days[days.length - 1].date;
+          fetchWeather(city, country, startDate, endDate)
+            .then((res) => {
+              if (res.success && res.forecasts && res.forecasts.length > 0) {
+                const byDate = {};
+                for (const f of res.forecasts) {
+                  byDate[f.date] = f;
+                }
+                setWeather(byDate);
+              } else {
+                // API returned no forecasts (dates too far out); use fallback
+                setWeather(fallback);
+              }
+            })
+            .catch(() => {
+              // Backend unreachable; use fallback weather from itinerary
+              setWeather(fallback);
+            });
+        } else if (Object.keys(fallback).length > 0) {
+          setWeather(fallback);
+        }
       }
     } catch (err) {
       addMessage("bot", `Failed to generate itinerary: ${err.message}`);
     } finally {
       setIsGenerating(false);
     }
-  }, [addMessage]);
+  }, [addMessage, preferences]);
 
   const resetToChat = useCallback(() => {
     setPhase("chat");
@@ -98,6 +134,7 @@ export function TripProvider({ children }) {
     setPreferences(null);
     setValidation(null);
     setItinerary(null);
+    setWeather(null);
     setIsExtracting(false);
     setIsGenerating(false);
   }, []);
@@ -112,6 +149,7 @@ export function TripProvider({ children }) {
         isExtracting,
         isGenerating,
         itinerary,
+        weather,
         backendConnected,
         sendMessage,
         generateItinerary: doGenerateItinerary,

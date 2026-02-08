@@ -32,6 +32,16 @@ export async function refinePreferences(preferences, additionalInput) {
   return res.json();
 }
 
+export async function fetchWeather(city, country, startDate, endDate) {
+  const params = new URLSearchParams({ city, country, start_date: startDate, end_date: endDate });
+  const res = await fetch(`${API_BASE}/api/weather?${params}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Weather fetch failed");
+  }
+  return res.json();
+}
+
 export async function generateItinerary() {
   const { mockItinerary } = await import("../data/mockItinerary.js");
   await new Promise((resolve) => setTimeout(resolve, 2500));
