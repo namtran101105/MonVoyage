@@ -1,0 +1,21 @@
+{
+  "city": "Toronto",
+  "country": "Canada",
+  "start_date": "2026-02-17",
+  "end_date": "2026-02-19",
+  "duration_days": 3,
+  "budget": 1000,
+  "budget_currency": "CAD",
+  "interests": [
+    "Culture and History",
+    "Food and Beverage"
+  ],
+  "pace": "relaxed",
+  "location_preference": "downtown",
+  "booking_type": "both",
+  "source_location": "montreal",
+  "_metadata": {
+    "created_at": "2026-02-08T03:33:35.783934",
+    "file_version": "1.0"
+  }
+}

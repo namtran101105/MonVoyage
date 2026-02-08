@@ -1,0 +1,97 @@
+.message {
+  display: flex;
+  margin-bottom: var(--space-lg);
+  animation: slideUp 0.3s ease-out;
+  gap: var(--space-sm);
+  align-items: flex-start;
+}
+
+.user {
+  justify-content: flex-end;
+}
+
+.bot {
+  justify-content: flex-start;
+}
+
+.system {
+  justify-content: center;
+}
+
+/* Avatar for bot messages */
+.avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--teal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+  box-shadow: 0 2px 6px var(--teal-glow);
+}
+
+.bubbleWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.user .bubbleWrap {
+  align-items: flex-end;
+}
+
+.bot .bubbleWrap {
+  align-items: flex-start;
+}
+
+.bubble {
+  max-width: 380px;
+  padding: 12px 18px;
+  border-radius: var(--radius-lg);
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.user .bubble {
+  background: var(--teal);
+  color: white;
+  border-bottom-right-radius: 6px;
+  box-shadow: 0 2px 8px var(--teal-glow);
+}
+
+.bot .bubble {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+  border-bottom-left-radius: 6px;
+  box-shadow: var(--shadow-md);
+}
+
+.system .bubble {
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  padding: var(--space-xs) var(--space-md);
+  max-width: 100%;
+}
+
+.time {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 0 4px;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

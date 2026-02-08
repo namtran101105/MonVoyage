@@ -1,464 +1,290 @@
 """
-MonVoyage Trip Planner — FastAPI application.
-
-Orchestrates NLP extraction, itinerary generation, and venue data from
-the Airflow-managed database.  Serves the frontend at ``/`` and exposes
-a REST API under ``/api/*``.
-
-Run:
-    python backend/app.py          # starts uvicorn with reload
-    uvicorn app:app --reload       # (from the backend/ directory)
-
-Auto-generated API docs:
-    http://localhost:8000/docs      (Swagger UI)
-    http://localhost:8000/redoc     (ReDoc)
+FastAPI application for Kingston Trip Planner.
+Simple API for testing NLP extraction.
 """
-
-from __future__ import annotations
-
-import logging
-import os
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
 import sys
-from contextlib import asynccontextmanager
-from typing import Optional
+import os
+import uvicorn
 
-# ---------------------------------------------------------------------------
-# Path setup — allow short imports like ``from config.settings import …``
-# ---------------------------------------------------------------------------
+# Add current directory to path for imports
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-
-from config.settings import settings
 from services.nlp_extraction_service import NLPExtractionService
-from services.itinerary_service import ItineraryService, ItineraryGenerationError
-from clients.gemini_client import ExternalAPIError
+from services.weather_service import WeatherService
 from models.trip_preferences import TripPreferences
-from utils.id_generator import generate_trip_id
-from schemas.api_models import (
-    ExtractRequest,
-    ExtractResponse,
-    RefineRequest,
-    RefineResponse,
-    GenerateItineraryRequest,
-    GenerateItineraryResponse,
-    HealthResponse,
-    ValidationResult,
-    FeasibilityResult,
-    ChatRequest,
-    ChatResponse,
-    ChatMessage,
-    RouteLeg,
-)
-from services.conversation_service import ConversationService
-from services.itinerary_orchestrator import ItineraryOrchestrator
+from config.settings import settings
 
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Module-level service instances (set during lifespan startup)
-# ---------------------------------------------------------------------------
-nlp_service: Optional[NLPExtractionService] = None
-itinerary_service: Optional[ItineraryService] = None
-conversation_service: Optional[ConversationService] = None
-nlp_service_error: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# Lifespan — initialise / tear down services
-# ---------------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    """Initialise services on startup; clean up on shutdown."""
-    global nlp_service, itinerary_service, conversation_service, nlp_service_error
-
-    try:
-        nlp_service = NLPExtractionService()
-        print("✅ NLP Extraction Service initialized successfully")
-    except Exception as exc:
-        nlp_service_error = str(exc)
-        print(f"❌ Failed to initialize NLP service: {exc}")
-        import traceback
-        traceback.print_exc()
-
-    try:
-        itinerary_service = ItineraryService()
-        print("✅ Itinerary Service initialized successfully")
-    except Exception as exc:
-        print(f"⚠️  Itinerary Service init failed (will still serve NLP): {exc}")
-
-    orchestrator = None
-    try:
-        orchestrator = ItineraryOrchestrator()
-        print("✅ Itinerary Orchestrator initialized successfully")
-    except Exception as exc:
-        print(f"⚠️  Itinerary Orchestrator init failed (will use basic flow): {exc}")
-
-    try:
-        conversation_service = ConversationService(orchestrator=orchestrator)
-        print("✅ Conversation Service initialized successfully")
-    except Exception as exc:
-        print(f"⚠️  Conversation Service init failed: {exc}")
-
-    yield  # ── application runs here ──
-
-    logger.info("Shutting down MonVoyage")
-
-
-# ---------------------------------------------------------------------------
-# App creation
-# ---------------------------------------------------------------------------
+# Initialize FastAPI app
 app = FastAPI(
-    title="MonVoyage Trip Planner",
-    version="0.2.0",
-    description="AI-powered itinerary engine for any city worldwide.",
-    lifespan=lifespan,
+    title="Kingston Trip Planner",
+    description="API for travel planning with NLP extraction",
+    version="1.0.0"
 )
 
-# CORS — allow all origins (matches previous Flask-CORS default)
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
 )
 
+# Initialize service
+nlp_service = None
+nlp_service_error = None
 
-# ---------------------------------------------------------------------------
-# Global exception handlers
-# ---------------------------------------------------------------------------
-@app.exception_handler(ItineraryGenerationError)
-async def _itinerary_error(request: Request, exc: ItineraryGenerationError):
-    return JSONResponse(
-        status_code=422,
-        content={
-            "success": False,
-            "error": exc.reason,
-            "constraints": exc.constraints,
-        },
-    )
+try:
+    nlp_service = NLPExtractionService()
+    print("✅ NLP Extraction Service initialized successfully")
+except Exception as e:
+    nlp_service_error = str(e)
+    print(f"❌ Failed to initialize NLP service: {e}")
+    import traceback
+    traceback.print_exc()
 
 
-@app.exception_handler(ExternalAPIError)
-async def _external_api_error(request: Request, exc: ExternalAPIError):
-    return JSONResponse(
-        status_code=502,
-        content={
-            "success": False,
-            "error": f"{exc.service} API failed: {exc.error}",
-        },
-    )
+# Pydantic models for request/response validation
+class ExtractRequest(BaseModel):
+    user_input: str
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+class RefineRequest(BaseModel):
+    preferences: Dict[str, Any]
+    additional_input: str
 
-# ── Frontend ────────────────────────────────────────────────────
 
-@app.get("/", include_in_schema=False)
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    model: str
+    nlp_service_ready: bool
+    error: Optional[str] = None
+
+
+class TripResponse(BaseModel):
+    success: bool
+    preferences: Optional[Dict[str, Any]] = None
+    validation: Optional[Dict[str, Any]] = None
+    bot_message: Optional[str] = None
+    saved_to_file: Optional[str] = None
+    error: Optional[str] = None
+
+
+@app.get('/')
 async def index():
     """Serve the frontend HTML page."""
-    frontend_path = os.path.join(
-        os.path.dirname(__file__), "..", "frontend", "index.html",
-    )
-    return FileResponse(frontend_path)
+    frontend_path = os.path.join(os.path.dirname(__file__), '../frontend/index.html')
+    if os.path.exists(frontend_path):
+        return FileResponse(frontend_path)
+    raise HTTPException(status_code=404, detail="Frontend not found")
 
 
-# ── Health check ────────────────────────────────────────────────
-
-@app.get("/api/health", response_model=HealthResponse, tags=["system"])
+@app.get('/api/health', response_model=HealthResponse)
 async def health_check():
-    """Return service health and active LLM information."""
-    if nlp_service:
-        if nlp_service.use_groq:
-            model_info = f"Groq ({settings.GROQ_MODEL})"
-            primary = "groq"
-        elif nlp_service.use_gemini:
-            model_info = f"Gemini ({settings.GEMINI_MODEL})"
-            primary = "gemini"
-        else:
-            model_info = "Unknown"
-            primary = "unknown"
-    else:
-        model_info = "Not initialized"
-        primary = "none"
-
-    return HealthResponse(
-        status="healthy",
-        service="MonVoyage Trip Planner",
-        primary_llm=primary,
-        model=model_info,
-        nlp_service_ready=nlp_service is not None,
-        error=nlp_service_error,
-    )
+    """Health check endpoint."""
+    return {
+        'status': 'healthy',
+        'service': 'Kingston Trip Planner',
+        'model': settings.GROQ_MODEL,
+        'nlp_service_ready': nlp_service is not None,
+        'error': nlp_service_error if nlp_service_error else None
+    }
 
 
-# ── Extract preferences ────────────────────────────────────────
-
-@app.post("/api/extract", response_model=ExtractResponse, tags=["preferences"])
-async def extract_preferences(body: ExtractRequest):
+@app.post('/api/extract', response_model=TripResponse)
+async def extract_preferences(request: ExtractRequest):
     """
-    Extract structured trip preferences from a natural-language message.
+    Extract trip preferences from user input.
 
-    The NLP service parses the user's input and returns a structured
-    ``TripPreferences`` dict together with validation results and a
-    conversational bot reply.
+    Request body:
+    {
+        "user_input": "I want to visit Kingston next weekend with my family..."
+    }
+
+    Response:
+    {
+        "success": true,
+        "trip_id": "trip_123...",
+        "preferences": {...},
+        "validation": {...}
+    }
     """
     if not nlp_service:
-        return JSONResponse(
+        raise HTTPException(
             status_code=500,
-            content={
-                "success": False,
-                "error": "NLP service not initialized. Check your API keys in .env file",
-            },
+            detail='NLP service not initialized. Check your GROQ_API_KEY in .env file'
         )
 
     try:
-        # Extract → validate → generate conversational response
-        preferences = await nlp_service.extract_preferences(body.user_input)
+        user_input = request.user_input.strip()
+
+        if not user_input:
+            raise HTTPException(status_code=400, detail='user_input is required')
+
+        # Extract preferences
+        preferences = nlp_service.extract_preferences(user_input)
+
+        # Validate preferences
         validation = nlp_service.validate_preferences(preferences)
-        bot_message, all_questions_asked = await nlp_service.generate_conversational_response(
-            user_input=body.user_input,
+
+        # Generate conversational response
+        bot_message, all_questions_asked = nlp_service.generate_conversational_response(
+            user_input=user_input,
             preferences=preferences,
             validation=validation,
-            is_refinement=False,
+            is_refinement=False
         )
 
-        # Persist to file when all required questions have been answered
+        # If all questions have been asked, save to JSON file
         saved_file_path = None
         if all_questions_asked:
             saved_file_path = nlp_service.save_preferences_to_file(preferences)
 
-        return ExtractResponse(
-            success=True,
-            preferences=preferences.to_dict(),
-            validation=ValidationResult(**validation),
-            bot_message=bot_message,
-            saved_to_file=saved_file_path,
-        )
+        # Return results
+        response_data = {
+            'success': True,
+            'preferences': preferences.to_dict(),
+            'validation': validation,
+            'bot_message': bot_message
+        }
 
-    except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(exc)},
-        )
+        # Include file path if saved
+        if saved_file_path:
+            response_data['saved_to_file'] = saved_file_path
+
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Refine preferences ─────────────────────────────────────────
-
-@app.post("/api/refine", response_model=RefineResponse, tags=["preferences"])
-async def refine_preferences(body: RefineRequest):
+@app.post('/api/refine', response_model=TripResponse)
+async def refine_preferences(request: RefineRequest):
     """
-    Refine previously extracted preferences with follow-up user input.
+    Refine existing preferences with additional input.
 
-    Accepts the prior ``preferences`` dict and an ``additional_input``
-    string, merges the new information, and returns the updated result.
+    Request body:
+    {
+        "preferences": {...},  # Previous preferences as dict
+        "additional_input": "I'm vegetarian and want to see Fort Henry"
+    }
     """
     if not nlp_service:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": "NLP service not initialized"},
-        )
+        raise HTTPException(status_code=500, detail='NLP service not initialized')
 
     try:
-        existing = TripPreferences.from_dict(body.preferences)
-        refined = await nlp_service.refine_preferences(existing, body.additional_input)
+        preferences_dict = request.preferences
+        additional_input = request.additional_input.strip()
+
+        if not preferences_dict or not additional_input:
+            raise HTTPException(
+                status_code=400,
+                detail='preferences and additional_input are required'
+            )
+
+        # Convert dict to TripPreferences object
+        existing_preferences = TripPreferences.from_dict(preferences_dict)
+
+        # Refine preferences
+        refined = nlp_service.refine_preferences(existing_preferences, additional_input)
+
+        # Validate
         validation = nlp_service.validate_preferences(refined)
-        bot_message, all_questions_asked = await nlp_service.generate_conversational_response(
-            user_input=body.additional_input,
+
+        # Generate conversational response for refinement
+        bot_message, all_questions_asked = nlp_service.generate_conversational_response(
+            user_input=additional_input,
             preferences=refined,
             validation=validation,
-            is_refinement=True,
+            is_refinement=True
         )
 
+        # If all questions have been asked, save to JSON file
         saved_file_path = None
         if all_questions_asked:
             saved_file_path = nlp_service.save_preferences_to_file(refined)
 
-        return RefineResponse(
-            success=True,
-            preferences=refined.to_dict(),
-            validation=ValidationResult(**validation),
-            bot_message=bot_message,
-            saved_to_file=saved_file_path,
-        )
+        # Return results
+        response_data = {
+            'success': True,
+            'preferences': refined.to_dict(),
+            'validation': validation,
+            'bot_message': bot_message
+        }
 
-    except Exception as exc:
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(exc)},
-        )
+        # Include file path if saved
+        if saved_file_path:
+            response_data['saved_to_file'] = saved_file_path
+
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Generate itinerary ─────────────────────────────────────────
-
-@app.post(
-    "/api/generate-itinerary",
-    response_model=GenerateItineraryResponse,
-    tags=["itinerary"],
-)
-async def generate_itinerary_endpoint(body: GenerateItineraryRequest):
-    """
-    Generate a day-by-day itinerary from complete trip preferences.
-
-    Requires all 10 mandatory preference fields.  The service queries
-    the Airflow venue database for real venue data (when available) and
-    calls the Gemini API to produce a feasible timetable.
-    """
-    if not itinerary_service:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "success": False,
-                "error": "Itinerary service not initialized",
-            },
-        )
+@app.get('/api/weather')
+async def get_weather(city: str, country: str = "", start_date: str = "", end_date: str = ""):
+    """Get weather forecast for a city and date range."""
+    if not city or not start_date or not end_date:
+        raise HTTPException(status_code=400, detail='city, start_date, and end_date are required')
 
     try:
-        request_id = generate_trip_id()
-        itinerary = await itinerary_service.generate_itinerary(
-            preferences=body.preferences,
-            request_id=request_id,
+        prefs = TripPreferences(
+            city=city,
+            country=country or "",
+            start_date=start_date,
+            end_date=end_date,
+            budget=100.0,
+            interests=["other"],
+            pace="moderate",
         )
+        service = WeatherService()
+        result = service.get_trip_weather(prefs)
 
-        # Re-run feasibility for the response envelope (cheap, no I/O)
-        feasibility = itinerary_service._validate_feasibility(
-            itinerary, body.preferences, request_id,
-        )
+        if result.get("error"):
+            return {"success": False, "forecasts": [], "error": result["error"]}
 
-        return GenerateItineraryResponse(
-            success=True,
-            itinerary=itinerary.to_dict(),
-            feasibility=FeasibilityResult(**feasibility),
-        )
+        return {"success": True, "forecasts": result.get("forecasts", [])}
 
-    except ValueError as exc:
-        # Validation errors (missing fields, budget too low, etc.)
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "error": str(exc)},
-        )
-    except ItineraryGenerationError as exc:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "success": False,
-                "error": exc.reason,
-                "feasibility": exc.constraints,
-            },
-        )
-    except Exception as exc:
-        logger.error("Itinerary generation failed", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(exc)},
-        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Conversational chat (Toronto MVP) ─────────────────────────
-
-@app.post("/api/chat", response_model=ChatResponse, tags=["chat"])
-async def chat(body: ChatRequest):
-    """
-    Conversational Toronto trip-planning assistant.
-
-    Send an empty ``messages`` list to receive the greeting.  On subsequent
-    turns, include the full ``messages`` array from the previous response
-    together with the new ``user_input``.
-
-    The service progresses through phases:
-    ``greeting`` → ``intake`` → ``confirmed`` → ``itinerary``.
-    """
-    if not conversation_service:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "success": False,
-                "error": "Conversation service not initialized. Check GROQ_API_KEY in .env",
-            },
-        )
-
+if __name__ == '__main__':
+    # Validate settings
     try:
-        messages_raw = [m.model_dump() for m in body.messages]
-
-        updated_messages, assistant_text, phase, still_need, enrichment = (
-            await conversation_service.turn(
-                messages=messages_raw,
-                user_input=body.user_input,
-            )
-        )
-
-        # Build enrichment fields for the response
-        weather_summary = None
-        booking_links = None
-        route_data = None
-
-        if enrichment:
-            weather_summary = enrichment.get("weather_summary")
-            booking_links = enrichment.get("booking_links")
-
-            raw_routes = enrichment.get("route_data")
-            if raw_routes:
-                route_data = [
-                    RouteLeg(
-                        leg=r.get("leg", i + 1),
-                        origin=r.get("origin", ""),
-                        destination=r.get("destination", ""),
-                        duration=r.get("duration"),
-                        distance=r.get("distance"),
-                        mode=r.get("mode"),
-                        google_maps_link=r.get("google_maps_link"),
-                    )
-                    for i, r in enumerate(raw_routes)
-                ]
-
-        return ChatResponse(
-            success=True,
-            messages=[ChatMessage(**m) for m in updated_messages],
-            assistant_message=assistant_text,
-            phase=phase,
-            still_need=still_need,
-            weather_summary=weather_summary,
-            booking_links=booking_links,
-            route_data=route_data,
-        )
-
-    except Exception as exc:
-        logger.error("Chat turn failed", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(exc)},
-        )
-
-
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-
-    errors = settings.validate()
-    if errors:
-        for err in errors:
-            print(f"❌ Configuration error: {err}")
+        settings.validate()
+        print(f"✅ Settings validated")
+        print(f"📍 Using Groq model: {settings.GROQ_MODEL}")
+        print(f"🌐 Starting server on http://{settings.HOST}:{settings.PORT}")
+    except ValueError as e:
+        print(f"❌ Configuration error: {e}")
         print("\n📝 Setup Instructions:")
         print("1. Copy backend/.env.example to backend/.env")
-        print("2. Add your Gemini API key from https://aistudio.google.com/apikey")
-        print("3. (Optional) Add your Groq API key from https://console.groq.com/keys")
-        print("4. Run the server again")
+        print("2. Add your Groq API key from https://console.groq.com/keys")
+        print("3. Run the server again")
         sys.exit(1)
 
-    print(f"✅ Settings validated")
-    print(f"🌐 Starting server on http://{settings.HOST}:{settings.PORT}")
-    print(f"📖 API docs at http://{settings.HOST}:{settings.PORT}/docs")
-
     uvicorn.run(
-        "app:app",
+        app,
         host=settings.HOST,
         port=settings.PORT,
-        reload=settings.DEBUG,
+        log_level="info"
     )
