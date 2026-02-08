@@ -39,3 +39,4 @@ data/itineraries/*.json
 airflow/logs/
 airflow/*.db
 airflow/*.pid
+doc/todo.md
