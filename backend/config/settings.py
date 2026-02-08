@@ -62,7 +62,7 @@ class Settings:
     # ===== Airflow / Venue Database =====
     APP_DB_URL: str = os.getenv(
         "APP_DB_URL",
-        "postgresql+psycopg2://app:app@localhost:5432/app",
+        "postgresql+psycopg2://app:app@localhost:5435/app",
     )
 
     # ===== Application Constants (Non-Negotiable MVP Rules) =====
@@ -80,24 +80,24 @@ class Settings:
         "own car", "rental car", "public transit", "walking only", "mixed",
     ]
 
-    # ===== Pace-Specific Parameters (from CLAUDE_EMBEDDED.md) =====
+    # ===== Pace-Specific Parameters (Toronto MVP) =====
     PACE_PARAMS = {
         "relaxed": {
-            "activities_per_day": (2, 3),
+            "activities_per_day": 2,  # Exactly 2 activities per day
             "minutes_per_activity": (90, 120),
             "buffer_between_activities": 20,
             "lunch_duration": 90,
             "dinner_duration": 120,
         },
         "moderate": {
-            "activities_per_day": (4, 5),
+            "activities_per_day": 3,  # Exactly 3 activities per day
             "minutes_per_activity": (60, 90),
             "buffer_between_activities": 15,
             "lunch_duration": 60,
             "dinner_duration": 90,
         },
         "packed": {
-            "activities_per_day": (6, 8),
+            "activities_per_day": 4,  # Exactly 4 activities per day
             "minutes_per_activity": (30, 60),
             "buffer_between_activities": 5,
             "lunch_duration": 45,

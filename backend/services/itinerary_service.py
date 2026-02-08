@@ -62,26 +62,28 @@ day-by-day itinerary timetables for ANY city worldwide.
 ## Hard Constraints (MUST follow)
 - Every activity must have explicit start and end times (HH:MM, 24-hour).
 - No two events may overlap within the same day.
-- Each day MUST include at least a lunch AND a dinner meal entry.
-- Activity durations and buffer times MUST match the pace:
-  * Relaxed  — 2-3 activities/day, 90-120 min each, 20 min buffers,
+- Each day MUST include BOTH lunch AND dinner meal entries with explicit times:
+  * Lunch MUST be scheduled between 11:30-13:30
+  * Dinner MUST be scheduled between 17:30-20:00
+- Activity count per day MUST match the pace (EXACT count, not a range):
+  * Relaxed  — EXACTLY 2 activities/day, 90-120 min each, 20 min buffers,
                90 min lunch, 120 min dinner.
-  * Moderate — 4-5 activities/day, 60-90 min each, 15 min buffers,
+  * Moderate — EXACTLY 3 activities/day, 60-90 min each, 15 min buffers,
                60 min lunch, 90 min dinner.
-  * Packed   — 6-8 activities/day, 30-60 min each, 5 min buffers,
+  * Packed   — EXACTLY 4 activities/day, 30-60 min each, 5 min buffers,
                45 min lunch, 60 min dinner.
-- The estimated daily cost (activities + meals) MUST NOT exceed the
-  daily budget.
 - First activity each day should be near the starting location; last
   activity should allow an easy return.
-- Budget minimum: $50 CAD per day for meals + activities.
+- If no interests are specified, distribute activities across diverse
+  categories (culture, food, entertainment, nature, sports) for variety.
 
 ## Quality Checks (perform before responding)
 1. Verify total number of days matches the requested duration.
-2. Verify every day has at least one activity AND two meals.
-3. Verify daily costs sum to the per-day total shown.
-4. Verify the user's interests are represented across the trip.
+2. Verify every day has BOTH lunch AND dinner with explicit times.
+3. Verify activity count per day EXACTLY matches pace (relaxed=2, moderate=3, packed=4).
+4. Verify the user's interests are represented across the trip (or diverse if no interests).
 5. Verify times are in chronological order with no overlaps.
+6. Verify EVERY activity has a Source citation (venue_id, url from database).
 
 ## Output Format
 Return ONLY a valid JSON object (no markdown fences, no prose).
@@ -89,7 +91,6 @@ The schema is:
 {
   "itinerary": {
     "option_name": "<string>",
-    "total_cost": <number>,
     "activities_per_day_avg": <number>,
     "total_travel_time_hours": <number>,
     "days": [
@@ -109,7 +110,6 @@ The schema is:
             "time_end": "HH:MM",
             "venue_name": "<string>",
             "category": "<interest_category>",
-            "cost": <number>,
             "duration_reason": "<why this duration for this pace>",
             "notes": "<brief description>",
             "source_url": "<venue_url_from_database>",
@@ -121,7 +121,6 @@ The schema is:
             "meal_type": "lunch|dinner",
             "venue_name": "<string>",
             "time": "HH:MM",
-            "cost": <number>
           }
         ],
         "evening_return": {
@@ -131,8 +130,6 @@ The schema is:
           "travel_minutes": <int>,
           "mode": "<transport_mode>"
         },
-        "daily_budget_allocated": <number>,
-        "daily_budget_spent": <number>
       }
     ]
   }
@@ -261,7 +258,7 @@ class ItineraryService:
                     "Calling Groq API for itinerary generation",
                     extra={"request_id": request_id},
                 )
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 response_text = await loop.run_in_executor(
                     None,
                     lambda: self.groq_client.generate_json_content(
@@ -354,11 +351,10 @@ class ItineraryService:
         """Validate the 10 required fields and normalise optional defaults."""
         v = prefs.copy()
 
-        # --- Required field presence ---
+        # --- Required field presence (budget is optional for MVP) ---
         required = [
             "city", "country", "start_date", "end_date",
-            "duration_days", "budget", "budget_currency",
-            "interests", "pace", "location_preference",
+            "duration_days", "pace",
         ]
         missing = [f for f in required if not v.get(f)]
         if missing:
@@ -367,8 +363,8 @@ class ItineraryService:
         # --- Dates ---
         start = date.fromisoformat(v["start_date"])
         end = date.fromisoformat(v["end_date"])
-        if end <= start:
-            raise ValueError("end_date must be after start_date")
+        if end < start:
+            raise ValueError("end_date must be on or after start_date")
         calculated = (end - start).days + 1
         if v["duration_days"] != calculated:
             self.logger.warning(
@@ -377,14 +373,8 @@ class ItineraryService:
             )
             v["duration_days"] = calculated
 
-        # --- Budget (NON-NEGOTIABLE) ---
-        daily = v["budget"] / v["duration_days"]
-        v["daily_budget"] = daily
-        if daily < settings.MIN_DAILY_BUDGET:
-            raise ValueError(
-                f"Daily budget ${daily:.2f} is below the minimum "
-                f"${settings.MIN_DAILY_BUDGET}/day for meals + activities"
-            )
+        # --- Budget (OPTIONAL for MVP) ---
+        # Budget validation removed - no longer required
 
         # --- Pace ---
         pace = v["pace"].lower()
@@ -392,9 +382,10 @@ class ItineraryService:
             raise ValueError(f"Invalid pace '{pace}'. Must be: relaxed, moderate, or packed")
         v["pace"] = pace
 
-        # --- Interests ---
+        # --- Interests (OPTIONAL - can be empty) ---
+        # If no interests specified, itinerary will distribute across diverse categories
         if not v.get("interests"):
-            raise ValueError("At least one interest is required")
+            v["interests"] = []  # Empty list is acceptable
 
         # --- Optional defaults ---
         default_start = v.get("location_preference") or f"Downtown {v['city']}"
@@ -423,12 +414,12 @@ class ItineraryService:
         """Build the per-request Gemini prompt, optionally including venue data."""
         pace = prefs["pace"]
         pp = settings.PACE_PARAMS[pace]
-        min_act, max_act = pp["activities_per_day"]
+        exact_activities = pp["activities_per_day"]  # Now an exact int, not a range
         min_dur, max_dur = pp["minutes_per_activity"]
 
         pace_block = (
             f"Pace: {pace.upper()}\n"
-            f"  - {min_act}-{max_act} activities per day\n"
+            f"  - EXACTLY {exact_activities} activities per day\n"
             f"  - {min_dur}-{max_dur} minutes per activity\n"
             f"  - {pp['buffer_between_activities']}-minute buffers between activities\n"
             f"  - {pp['lunch_duration']}-minute lunch, {pp['dinner_duration']}-minute dinner"
@@ -463,6 +454,14 @@ class ItineraryService:
                 "Please ensure the database is seeded with venues for this destination.\n"
             )
 
+        # Budget is optional for MVP - only include if provided
+        budget_line = ""
+        if prefs.get("budget") and prefs.get("daily_budget"):
+            budget_line = (
+                f"- Budget: ${prefs['budget']:.2f} total "
+                f"(${prefs['daily_budget']:.2f}/day) {prefs['budget_currency']}\n"
+            )
+
         return (
             f"Generate a complete day-by-day itinerary for a trip to "
             f"{prefs['city']}, {prefs['country']}.\n\n"
@@ -472,8 +471,7 @@ class ItineraryService:
             f"- Dates: {prefs['start_date']} to {prefs['end_date']} "
             f"({prefs['duration_days']} days)\n"
             f"- Hours per day: {prefs['hours_per_day']}\n"
-            f"- Budget: ${prefs['budget']:.2f} total "
-            f"(${prefs['daily_budget']:.2f}/day) {prefs['budget_currency']}\n"
+            f"{budget_line}"
             f"- Transportation: {transport}\n"
             f"- {pace_block}\n\n"
             f"**Preferences:**\n"
@@ -658,7 +656,7 @@ class ItineraryService:
                     activities=activities,
                     meals=meals,
                     daily_budget_allocated=float(
-                        day_raw.get("daily_budget_allocated", prefs["daily_budget"])
+                        day_raw.get("daily_budget_allocated", prefs.get("daily_budget", 0.0))
                     ),
                     daily_budget_spent=float(day_raw.get("daily_budget_spent", 0)),
                     total_activities=len(activities),
@@ -673,7 +671,7 @@ class ItineraryService:
             created_at=datetime.now().isoformat(),
             status="draft",
             days=days,
-            total_budget=float(prefs["budget"]),
+            total_budget=float(prefs.get("budget", 0.0)),  # Budget is optional
             total_spent=total_spent,
             total_activities=sum(d.total_activities for d in days),
             activities_per_day_avg=float(itin.get("activities_per_day_avg", 0)),
@@ -710,35 +708,29 @@ class ItineraryService:
                 issues.append(f"{tag}: no activities scheduled")
 
             if len(day.meals) < 2:
-                warnings.append(f"{tag}: only {len(day.meals)} meal(s) (expected 2+)")
+                issues.append(f"{tag}: only {len(day.meals)} meal(s) - MUST have both lunch AND dinner")
 
-            # Budget (10 % tolerance per day)
-            if day.daily_budget_spent > day.daily_budget_allocated * 1.10:
-                issues.append(
-                    f"{tag}: budget exceeded "
-                    f"(${day.daily_budget_spent:.2f} > ${day.daily_budget_allocated:.2f})"
-                )
-
-            # Activity count vs. pace
-            lo, hi = pp["activities_per_day"]
+            # Activity count vs. pace (EXACT count required, not range)
+            expected_activities = pp["activities_per_day"]
             n = len(day.activities)
-            if n < lo or n > hi:
-                warnings.append(
-                    f"{tag}: {n} activities (expected {lo}-{hi} for {prefs['pace']} pace)"
+            if n != expected_activities:
+                issues.append(
+                    f"{tag}: {n} activities (expected EXACTLY {expected_activities} for {prefs['pace']} pace)"
                 )
 
-        # Total budget (5 % tolerance)
-        if itinerary.total_spent > itinerary.total_budget * 1.05:
-            issues.append(
-                f"Total budget exceeded (${itinerary.total_spent:.2f} > "
-                f"${itinerary.total_budget:.2f})"
-            )
+            # Source citation validation (Bug 1.9)
+            for idx, activity in enumerate(day.activities, 1):
+                if not activity.source_url or not activity.from_database:
+                    issues.append(
+                        f"{tag}, Activity {idx} ({activity.venue_name}): missing source citation or not from database"
+                    )
 
-        # Interest coverage
-        used = {a.category for d in itinerary.days for a in d.activities if a.category}
-        missing = [i for i in prefs["interests"] if i not in used]
-        if missing:
-            warnings.append(f"Interests not covered: {missing}")
+        # Interest coverage (optional for MVP - only check if interests provided)
+        if prefs.get("interests"):
+            used = {a.category for d in itinerary.days for a in d.activities if a.category}
+            missing = [i for i in prefs["interests"] if i not in used]
+            if missing:
+                warnings.append(f"Interests not covered: {missing}")
 
         feasible = len(issues) == 0
         result = {

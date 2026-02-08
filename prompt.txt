@@ -1,0 +1,957 @@
+
+You are working on **MonVoyage**, an AI-powered travel itinerary planning application. The system uses a **microservices architecture** with FastAPI backend, PostgreSQL database (managed by Apache Airflow), and integrates multiple external APIs (Groq/Gemini for LLM, Open-Meteo for weather, Google Maps for routing, and booking services for flights/accommodations).
+
+**Critical Environment Requirement:** All code execution, dependency installation, and server operations **MUST run in the `.venv` Python virtual environment** located at the project root.
+
+***
+
+
+## **Architecture Deep Dive**
+
+### **1. Virtual Environment Setup**
+
+**MANDATORY FIRST STEP:** Always activate the virtual environment before ANY operation:
+
+```bash
+# From project root
+source .venv/bin/activate
+
+# Verify activation (should show .venv path)
+which python
+
+# Install/update dependencies
+pip install -r requirements.txt
+```
+
+**For AI Code Execution:**
+- Never use global Python
+- All `python` commands must execute within `.venv`
+- Check activation with: `echo $VIRTUAL_ENV` (should output `/path/to/MonVoyage/.venv`)
+
+***
+
+### **2. Database Architecture: Airflow-Managed PostgreSQL**
+
+#### **Database Connection**
+```python
+# config/settings.py
+APP_DB_URL = "postgresql+psycopg2://app:app@localhost:5435/app"
+```
+
+**Port 5435** (not 5432) is used to avoid conflicts with local PostgreSQL.
+
+#### **Database Schema** (from `airflow/dags/lib/db.py`)
+
+**Table: `places`**
+```sql
+CREATE TABLE places (
+    id SERIAL PRIMARY KEY,
+    place_key VARCHAR UNIQUE NOT NULL,      -- Unique identifier (e.g., "cn_tower")
+    canonical_name VARCHAR NOT NULL,        -- Display name ("CN Tower")
+    category VARCHAR,                       -- Category (e.g., "tourism", "museum", "food")
+    city VARCHAR,                           -- City ("Toronto")
+    country VARCHAR,                        -- Country ("Canada")
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+**Table: `tracked_pages`**
+```sql
+CREATE TABLE tracked_pages (
+    id SERIAL PRIMARY KEY,
+    place_id INTEGER REFERENCES places(id),
+    url TEXT NOT NULL,                      -- Source URL for the venue
+    page_type VARCHAR,                      -- Type: "homepage", "menu", "about"
+    extract_strategy VARCHAR,               -- Extraction strategy
+    enabled BOOLEAN DEFAULT TRUE
+);
+```
+
+**Table: `place_facts`**
+```sql
+CREATE TABLE place_facts (
+    id SERIAL PRIMARY KEY,
+    place_id INTEGER REFERENCES places(id),
+    fact_key VARCHAR NOT NULL,              -- e.g., "address", "phone", "hours"
+    fact_value TEXT,
+    extracted_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+####**Airflow Workflow**
+1. **Docker Compose**: Runs Airflow webserver, scheduler, and PostgreSQL
+2. **DAG Execution**: `website_change_monitor.py` scrapes venue websites (TripAdvisor, official sites)
+3. **Data Pipeline**: Scraped data → PostgreSQL `places` table → Backend services query
+
+**Start Airflow Stack:**
+```bash
+docker compose -f docker-compose.dev.yml up -d
+```
+
+**Seed Database with Toronto Venues:**
+```bash
+# Run from project root with .venv activated
+python airflow/dags/lib/seed_tracked_sites.py
+```
+
+***
+
+### **3. Service Layer Architecture**
+
+#### **3.1 conversation_service.py** - Multi-Turn Chat Orchestrator
+
+**Purpose:** Manages the full conversation lifecycle from greeting → data collection → confirmation → itinerary generation.
+
+**Phases:**
+1. `greeting` - Initial welcome message
+2. `intake` - Collects required fields (city, country, dates, pace)
+3. `confirmed` - Waits for user to say "yes" to generate
+4. `itinerary` - Calls orchestrator and returns final itinerary
+
+**Key Methods:**
+```python
+class ConversationService:
+    def __init__(self, orchestrator: ItineraryOrchestrator = None):
+        self.orchestrator = orchestrator
+        self.use_groq = True  # Primary LLM
+        self.use_gemini = False  # Fallback
+    
+    async def turn(
+        self,
+        messages: List[Dict[str, str]],
+        user_input: Optional[str] = None
+    ) -> Tuple[List[Dict], str, str, Optional[List], Optional[Dict]]:
+        """
+        Execute one conversation turn.
+        
+        Returns:
+            (messages, assistant_text, phase, still_need, enrichment)
+        """
+```
+
+**System Prompt Logic:**
+- Uses `INTAKE_SYSTEM_PROMPT` for data collection
+- Transitions to `ITINERARY_SYSTEM_PROMPT_TEMPLATE` when generating
+- **Never mentions** internal mechanics (database, AI, Airflow, parameters)
+
+***
+
+#### **3.2 nlp_extraction_service.py** - Natural Language Understanding
+
+**Purpose:** Extracts structured `TripPreferences` from user messages using Groq (primary) or Gemini (fallback).
+
+**LLM Fallback Chain:**
+```python
+1. Groq (llama-3.3-70b-versatile) - Primary, faster
+2. Gemini (gemini-2.0-flash-exp) - Fallback if Groq fails
+```
+
+**Extraction Schema:**
+```python
+{
+    "city": str | None, #REQUIRED
+    "country": str | None, #REQUIRED
+    "start_date": "YYYY-MM-DD" | None, #REQUIRED
+    "end_date": "YYYY-MM-DD" | None, # EITHER HAVE END_DATE OR EITHER HAVE DURATION_DAYS
+    "duration_days": int | None,
+    "interests": List[str],  # Exactly 5 categories # OPTIONAL user can not choose, then the AI will choose in a mixed way 
+    "pace": "relaxed" | "moderate" | "packed", #REQUIRED
+    "location_preference": str | None, # OPTIONAL
+    "booking_type": "accommodation" | "transportation" | "both" | "none", # OPTIONAL
+    "source_location": str | None,  # Origin city if booking flights
+    "budget": float | None  # OPTIONAL - not required
+}
+```
+
+**Interest Categories (EXACT NAMES ONLY):**
+1. `"Food and Beverage"` - restaurants, cafes, breweries, dining
+2. `"Entertainment"` - shopping, nightlife, concerts, zoo, aquarium
+3. `"Culture and History"` - museums, churches, galleries, monuments
+4. `"Sport"` - stadiums, golf, cycling, swimming
+5. `"Natural Place"` - parks, beaches, hiking, gardens
+
+**Key Method:**
+```python
+async def extract_preferences(self, user_input: str) -> TripPreferences:
+    """Extract structured data from natural language."""
+    # Calls Groq first, Gemini fallback
+    # Returns TripPreferences dataclass
+```
+
+***
+
+#### **3.3 itinerary_orchestrator.py** - Service Coordination Hub
+
+**Purpose:** Coordinates parallel service calls and aggregates results before passing to `itinerary_service`.
+
+**Service Dependencies:**
+```python
+class ItineraryOrchestrator:
+    def __init__(self):
+        self.weather_service = WeatherService()       # No API key needed (Open-Meteo)
+        self.budget_service = None                    # DISABLED - explicitly set to None
+        self.maps_service = GoogleMapsService()       # Requires GOOGLE_MAPS_API_KEY
+        self.venue_service = VenueService()           # Queries Airflow DB
+```
+
+**Workflow:**
+```python
+async def generate_enriched_itinerary(
+    self,
+    messages: List[Dict[str, str]],
+    llm_caller: Callable,
+    use_groq: bool,
+    use_gemini: bool,
+    groq_client: Any,
+    gemini_client: Any
+) -> Dict[str, Any]:
+    """
+    1. Extract preferences from conversation history
+    2. Parallel fetch: weather + venues (budget DISABLED)
+    3. Build prompt with venue catalogue + weather context
+    4. Call LLM (Groq → Gemini fallback)
+    5. Parse and return enriched itinerary
+    """
+```
+
+**Budget Service Status:**
+```python
+# From __init__:
+# Budget — DISABLED FOR MVP (budget is now optional)
+self.budget_service = None  # Explicitly disabled for MVP
+```
+
+***
+
+#### **3.4 venue_service.py** - Airflow Database Query Layer
+
+**Purpose:** Queries the PostgreSQL database for venue data. Falls back to hardcoded Toronto venues if DB unavailable.
+
+**Key Methods:**
+```python
+class VenueService:
+    def __init__(self, db_url: Optional[str] = None):
+        # Connects to APP_DB_URL from settings
+        self._engine = create_engine(url, pool_pre_ping=True)
+    
+    def get_venues_for_itinerary(
+        self,
+        city: str,
+        interests: List[str],
+        budget_per_day: float,
+        limit: int = 30
+    ) -> List[Dict[str, Any]]:
+        """
+        Query places table filtered by:
+        - City match
+        - Category mapping from interests
+        - Limit results
+        
+        Returns:
+        [
+            {
+                "place_id": int,
+                "name": str,
+                "category": str,
+                "address": str,
+                "description": str,
+                "source_url": str
+            }
+        ]
+        """
+    
+    @staticmethod
+    def format_venues_for_chat(venues: List[Dict]) -> str:
+        """
+        Convert venue list to LLM-friendly format:
+        
+        ID: <place_id>
+        Name: <name>
+        Category: <category>
+        Address: <address>
+        Description: <description>
+        URL: <source_url>
+        ---
+        """
+```
+
+**Interest → Database Category Mapping:**
+```python
+INTEREST_TO_DB_CATEGORIES = {
+    "Food and Beverage": ["restaurant", "cafe", "bakery", "brewery", "food", "bar"],
+    "Entertainment": ["entertainment", "shopping", "nightlife", "casino", "spa"],
+    "Culture and History": ["museum", "gallery", "church", "historic", "tourism", "culture"],
+    "Sport": ["sport", "stadium", "golf", "recreation"],
+    "Natural Place": ["park", "garden", "nature", "beach", "trail", "island"]
+}
+```
+
+**Fallback Venues:**
+```python
+TORONTO_FALLBACK_VENUES = [
+    # 15 hardcoded Toronto venues (CN Tower, ROM, St. Lawrence Market, etc.)
+    # Used when database is unavailable
+]
+```
+
+***
+
+#### **3.5 itinerary_service.py** - LLM Itinerary Generation
+
+**Purpose:** Generates day-by-day itineraries using Groq (primary) or Gemini (fallback) with **strict venue constraints**.
+
+**Critical System Instruction:**
+```python
+GEMINI_ITINERARY_SYSTEM_INSTRUCTION = """
+You are an expert travel planner that generates precise, feasible
+day-by-day itinerary timetables for ANY city worldwide.
+
+## CRITICAL DATABASE-ONLY RULE:
+You MUST ONLY use venues from the AVAILABLE VENUES list provided from 
+the database. DO NOT invent, create, or suggest any venues that are not 
+explicitly listed in the database section.
+
+If there are insufficient venues in the database to fill the itinerary,
+reduce the number of activities per day rather than inventing venues.
+
+## Activity Count Rules (EXACT COUNT):
+- Relaxed: EXACTLY 2 activities/day, 90-120 min each
+- Moderate: EXACTLY 3 activities/day, 60-90 min each  
+- Packed: EXACTLY 4 activities/day, 30-60 min each
+
+## Meal Requirements:
+- Each day MUST have BOTH lunch AND dinner
+- Lunch: 11:30-13:30
+- Dinner: 17:30-20:00
+
+## Source Citation:
+Every activity MUST have: Source: <venue_id>, <url>
+"""
+```
+
+**Output Schema:**
+```json
+{
+  "itinerary": {
+    "option_name": "Toronto Cultural Explorer",
+    "activities_per_day_avg": 3,
+    "total_travel_time_hours": 2.5,
+    "days": [
+      {
+        "day": 1,
+        "date": "2026-03-15",
+        "morning_departure": {
+          "time": "09:00",
+          "from": "Downtown Toronto (Accommodation)",
+          "to": "CN Tower",
+          "travel_minutes": 15,
+          "mode": "walking"
+        },
+        "activities": [
+          {
+            "time_start": "09:15",
+            "time_end": "11:00",
+            "venue_name": "CN Tower",
+            "category": "tourism",
+            "duration_reason": "105 minutes for moderate pace",
+            "notes": "Iconic observation tower",
+            "source_url": "https://www.cntower.ca",
+            "from_database": true
+          }
+        ],
+        "meals": [
+          {
+            "meal_type": "lunch",
+            "venue_name": "St. Lawrence Market",
+            "time": "13:15"
+          },
+          {
+            "meal_type": "dinner",
+            "venue_name": "Canoe Restaurant",
+            "time": "19:00"
+          }
+        ],
+        "evening_return": {
+          "time": "21:00",
+          "from": "Last Venue",
+          "to": "Accommodation",
+          "travel_minutes": 10,
+          "mode": "transit"
+        }
+      }
+    ]
+  }
+}
+```
+
+***
+
+#### **3.6 weather_service.py** - Open-Meteo API Integration
+
+**Purpose:** Fetches weather forecasts for trip dates using the **free** Open-Meteo API (no API key required).
+
+**Key Method:**
+```python
+class WeatherService:
+    def get_trip_weather(self, preferences: TripPreferences) -> Dict[str, Any]:
+        """
+        Returns:
+        {
+            "city": "Toronto",
+            "country": "Canada",
+            "start_date": "2026-03-15",
+            "end_date": "2026-03-17",
+            "duration_days": 3,
+            "forecasts": [
+                {
+                    "date": "2026-03-15",
+                    "temp_min_c": 2,
+                    "temp_max_c": 8,
+                    "condition": "partly cloudy",
+                    "precipitation_mm": 0.5,
+                    "precipitation_chance": 20,
+                    "wind_speed_kmh": 15,
+                    "sunrise": "06:45",
+                    "sunset": "18:30"
+                }
+            ]
+        }
+        """
+```
+
+**Integration with Itinerary:**
+- Weather data is passed to `itinerary_service` as context
+- LLM uses weather to prioritize indoor activities on rainy days
+- Included in final enriched response
+
+***
+
+#### **3.7 booking_service.py** - Flight & Accommodation Link Generation
+
+**Purpose:** Generates pre-filled booking URLs for Skyscanner (flights), Airbnb, and Busbud (buses/trains).
+
+**Workflow:**
+```python
+class BookingService:
+    def book_trip(self, preferences: TripPreferences) -> Dict[str, Any]:
+        """
+        Based on preferences.booking_type:
+        - "accommodation" → Airbnb link only
+        - "transportation" → Flight + bus links
+        - "both" → All booking links
+        - "none" → Skip booking generation
+        """
+```
+
+**Generated URLs:**
+```python
+# Flight (Skyscanner)
+"https://www.skyscanner.com/transport/flights/{origin}/{destination}/{departure_date}/{return_date}/"
+
+# Airbnb
+"https://www.airbnb.com/s/{city}--{country}/homes?checkin={checkin}&checkout={checkout}&adults=1"
+
+# Bus/Train (Busbud)
+"https://www.busbud.com/en/bus-{origin}-{destination}/{departure_date}"
+```
+
+***
+
+#### **3.8 google_maps_service.py** - Travel Time & Route Calculation
+
+**Purpose:** Calculates travel times and generates Google Maps links between venues.
+
+**Key Methods:**
+```python
+class GoogleMapsService:
+    def get_itinerary_routes(
+        self,
+        venue_names: List[str],
+        city: str,
+        country: str,
+        mode: str = "transit"
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns route legs between consecutive venues:
+        [
+            {
+                "leg": 1,
+                "origin": "CN Tower, Toronto, Canada",
+                "destination": "Royal Ontario Museum, Toronto, Canada",
+                "distance": "5.2 km",
+                "duration": "15 mins",
+                "mode": "transit",
+                "google_maps_link": "https://www.google.com/maps/dir/?api=1&..."
+            }
+        ]
+        """
+```
+
+**Travel Mode Logic:**
+- Walking: < 1.5 km
+- Transit (TTC, metro): 1.5-10 km
+- Taxi/Uber: > 10 km
+
+***
+
+### **4. FastAPI Application (app.py)**
+
+**Entry Point:** `backend/app.py`
+
+**Key Endpoints:**
+
+```python
+# Health check
+GET /api/health
+Response: {
+    "status": "healthy",
+    "primary_llm": "groq",
+    "model": "Groq (llama-3.3-70b-versatile)",
+    "nlp_service_ready": true
+}
+
+# Chat endpoint (main interface)
+POST /api/chat
+Request: {
+    "messages": [
+        {"role": "user", "content": "I want to visit Toronto"}
+    ]
+}
+Response: {
+    "success": true,
+    "messages": [...],
+    "assistant_text": "Great! When are you planning to visit?",
+    "phase": "intake",
+    "still_need": ["dates", "pace"],
+    "enrichment": null
+}
+
+# Generate itinerary (legacy, used internally)
+POST /api/generate-itinerary
+Request: {
+    "preferences": {
+        "city": "Toronto",
+        "country": "Canada",
+        ...
+    }
+}
+Response: {
+    "success": true,
+    "itinerary": {...},
+    "feasibility": {...}
+}
+```
+
+**Service Initialization:**
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global nlp_service, itinerary_service, conversation_service
+    
+    # Initialize services with fallback handling
+    nlp_service = NLPExtractionService()  # Groq → Gemini
+    itinerary_service = ItineraryService()  # Groq → Gemini
+    orchestrator = ItineraryOrchestrator()
+    conversation_service = ConversationService(orchestrator=orchestrator)
+    
+    yield
+```
+
+**Run the Backend:**
+```bash
+# Activate venv
+source .venv/bin/activate
+
+# Start FastAPI server
+cd backend
+python app.py
+
+# Or use uvicorn directly
+uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+***
+
+## **Complete Workflow: User Journey**
+
+### **Phase 1: Conversation (intake)**
+
+**User:** "I want to visit Toronto"
+
+**AI Response:**
+```
+"Wonderful! Toronto is a fantastic city. When are you planning to visit?"
+```
+
+**Behind the Scenes:**
+1. `conversation_service.turn()` called with empty message history
+2. Phase detected as `"greeting"` → transitions to `"intake"`
+3. `nlp_extraction_service.extract_preferences()` extracts:
+   ```json
+   {
+       "city": "Toronto",
+       "country": "Canada",
+       "start_date": null,
+       "end_date": null,
+       "pace": null
+   }
+   ```
+4. `still_need`: `["dates", "pace"]`
+
+**User:** "March 15-17, moderate pace"
+
+**AI Response:**
+```
+"Perfect! A 3-day trip from March 15-17 at a moderate pace. What are you most interested in? (art, history, food, nature, sports)"
+```
+
+**Behind the Scenes:**
+1. `nlp_extraction_service` updates extraction:
+   ```json
+   {
+       "city": "Toronto",
+       "country": "Canada",
+       "start_date": "2026-03-15",
+       "end_date": "2026-03-17",
+       "duration_days": 3,
+       "pace": "moderate",
+       "interests": []
+   }
+   ```
+2. `still_need`: `[]` (interests optional)
+
+**User:** "Art and food"
+
+**AI Response:**
+```
+"Great! I have everything I need. Want me to create your personalized Toronto itinerary?"
+```
+
+**Behind the Scenes:**
+1. Final extraction:
+   ```json
+   {
+       "city": "Toronto",
+       "country": "Canada",
+       "start_date": "2026-03-15",
+       "end_date": "2026-03-17",
+       "duration_days": 3,
+       "pace": "moderate",
+       "interests": ["Culture and History", "Food and Beverage"]
+   }
+   ```
+2. Phase transitions to `"confirmed"`
+3. Waits for user confirmation
+
+***
+
+### **Phase 2: Itinerary Generation**
+
+**User:** "Yes"
+
+**Behind the Scenes:**
+
+1. **conversation_service** detects confirmation → calls `orchestrator.generate_enriched_itinerary()`
+
+2. **itinerary_orchestrator** coordinates:
+   ```python
+   # Parallel calls
+   weather_task = weather_service.get_trip_weather(...)
+   venue_task = venue_service.get_venues_for_itinerary(
+       city="Toronto",
+       interests=["Culture and History", "Food and Beverage"],
+       budget_per_day=None,  # Budget disabled
+       limit=30
+   )
+   
+   weather_data, venues = await asyncio.gather(weather_task, venue_task)
+   ```
+
+3. **venue_service** queries database:
+   ```sql
+   SELECT places.id, places.canonical_name, places.category, 
+          place_facts.fact_value AS address, 
+          tracked_pages.url AS source_url
+   FROM places
+   LEFT JOIN place_facts ON places.id = place_facts.place_id
+   LEFT JOIN tracked_pages ON places.id = tracked_pages.place_id
+   WHERE places.city = 'Toronto'
+     AND places.category IN ('museum', 'gallery', 'restaurant', 'cafe', 'food')
+   LIMIT 30;
+   ```
+
+4. **itinerary_service** receives:
+   - Venue catalogue: 30 Toronto venues with URLs
+   - Weather data: 3-day forecast (March 15-17)
+   
+5. **LLM Prompt Construction:**
+   ```
+   VENUE LIST — START
+   ID: 1
+   Name: Royal Ontario Museum
+   Category: museum
+   Address: 100 Queens Park, Toronto, ON
+   Description: Canada's largest museum
+   URL: https://www.rom.on.ca
+   ---
+   ID: 2
+   Name: St. Lawrence Market
+   Category: food
+   ...
+   VENUE LIST — END
+   
+   WEATHER CONTEXT:
+   March 15: Partly cloudy, 2-8°C, 20% rain
+   March 16: Sunny, 5-10°C, 10% rain
+   March 17: Light rain, 3-7°C, 65% rain
+   
+   Generate a 3-day moderate-paced itinerary with:
+   - EXACTLY 3 activities per day
+   - 2 meals per day (lunch 11:30-13:30, dinner 17:30-20:00)
+   - Use ONLY venues from the list above
+   - Include Source citations
+   ```
+
+6. **Groq/Gemini generates JSON itinerary**
+
+7. **Validation:**
+   ```python
+   # Check all activities have from_database: true
+   # Verify activity count matches pace
+   # Confirm all meals included
+   # Validate times are chronological
+   ```
+
+8. **Return enriched response:**
+   ```json
+   {
+       "itinerary_text": "Day 1\nMorning: Royal Ontario Museum...",
+       "weather_summary": "Expect mild weather, some rain on Day 3",
+       "budget_summary": null,  # Disabled
+       "route_data": null  # Google Maps integration (if API key present)
+   }
+   ```
+
+***
+
+## **Environment Configuration (.env)**
+
+```bash
+# LLM APIs (at least ONE required)
+GROQ_API_KEY=gsk_...                           # Primary LLM
+GEMINI_KEY=AIza...                             # Fallback LLM
+
+# LLM Configuration
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_TEMPERATURE=0.7
+GROQ_MAX_TOKENS=4096
+
+GEMINI_MODEL=gemini-2.0-flash-exp
+GEMINI_TEMPERATURE=0.7
+GEMINI_ITINERARY_TEMPERATURE=0.7
+GEMINI_MAX_TOKENS=4096
+GEMINI_ITINERARY_MAX_TOKENS=8192
+
+# Database (Airflow-managed PostgreSQL)
+APP_DB_URL=postgresql+psycopg2://app:app@localhost:5435/app
+
+# Optional APIs
+GOOGLE_MAPS_API_KEY=AIza...                    # For route calculation
+# Weather API: Open-Meteo (no key required)
+
+# Application Settings
+DEFAULT_CITY=Toronto
+DEFAULT_COUNTRY=Canada
+LOG_LEVEL=INFO
+```
+
+***
+
+## **Running the Complete System**
+
+### **Step 1: Activate Virtual Environment**
+```bash
+cd /path/to/MonVoyage
+source .venv/bin/activate
+```
+
+### **Step 2: Start Docker Services (Airflow + PostgreSQL)**
+```bash
+docker compose -f docker-compose.dev.yml up -d
+
+# Verify containers running
+docker compose -f docker-compose.dev.yml ps
+```
+
+### **Step 3: Seed Database**
+```bash
+# Run with .venv activated
+python airflow/dags/lib/seed_tracked_sites.py
+```
+
+**Expected Output:**
+```
+Seeding database with Toronto venues...
+✅ Created 15 places
+✅ Created 15 tracked pages
+✅ Database seeded successfully!
+```
+
+### **Step 4: Start FastAPI Backend**
+```bash
+cd backend
+python app.py
+```
+
+**Expected Output:**
+```
+✅ Using Groq API (Primary)
+✅ NLP Extraction Service initialized successfully
+✅ Itinerary Service initialized successfully
+✅ Itinerary Orchestrator initialized successfully
+✅ Conversation Service initialized successfully
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+### **Step 5: Access Application**
+- Frontend: http://localhost:8000
+- API Docs: http://localhost:8000/docs
+- Health Check: http://localhost:8000/api/health
+
+***
+
+## **Testing & Validation**
+
+### **Test NLP Extraction**
+```bash
+# With .venv activated
+cd backend
+python -c "
+import asyncio
+from services.nlp_extraction_service import NLPExtractionService
+
+async def test():
+    service = NLPExtractionService()
+    prefs = await service.extract_preferences('Toronto March 15-17 moderate pace art and food')
+    print(prefs.to_dict())
+
+asyncio.run(test())
+"
+```
+
+### **Test Venue Database Query**
+```bash
+python -c "
+from services.venue_service import VenueService
+
+service = VenueService()
+venues = service.get_venues_for_itinerary(
+    city='Toronto',
+    interests=['Culture and History', 'Food and Beverage'],
+    budget_per_day=100.0,
+    limit=10
+)
+print(f'Found {len(venues)} venues')
+for v in venues:
+    print(f\"  - {v['name']} ({v['category']})\")
+"
+```
+
+### **Test Complete Itinerary Generation**
+```bash
+python -c "
+import asyncio
+from services.itinerary_service import ItineraryService
+
+async def test():
+    service = ItineraryService()
+    prefs = {
+        'city': 'Toronto',
+        'country': 'Canada',
+        'start_date': '2026-03-15',
+        'end_date': '2026-03-17',
+        'duration_days': 3,
+        'pace': 'moderate',
+        'interests': ['Culture and History', 'Food and Beverage'],
+        'budget': None,
+        'location_preference': 'downtown'
+    }
+    itinerary = await service.generate_itinerary(prefs, request_id='test-001')
+    print(f'Generated {len(itinerary.days)} days')
+    for day in itinerary.days:
+        print(f'Day {day.day}: {len(day.activities)} activities')
+
+asyncio.run(test())
+"
+```
+
+***
+
+## **Common Issues & Solutions**
+
+### **Issue 1: "ModuleNotFoundError: No module named..."**
+**Solution:** Activate `.venv` and reinstall dependencies
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### **Issue 2: "Database connection failed"**
+**Solution:** Verify Docker containers running
+```bash
+docker compose -f docker-compose.dev.yml ps
+docker compose -f docker-compose.dev.yml logs appdb
+```
+
+### **Issue 3: "No API keys configured"**
+**Solution:** Check `.env` file has `GROQ_API_KEY` or `GEMINI_KEY`
+```bash
+cat .env | grep -E '(GROQ|GEMINI)_'
+```
+
+### **Issue 4: "Venue database empty"**
+**Solution:** Run seeding script
+```bash
+source .venv/bin/activate
+python airflow/dags/lib/seed_tracked_sites.py
+```
+
+### **Issue 5: "LLM generates venues not in database"**
+**Solution:** Check system prompt includes venue catalogue. The `itinerary_service` should inject venue data into the prompt:
+```python
+# In itinerary_service.py
+venues = await self._fetch_venues(validated)
+prompt = self._build_generation_prompt(validated, venues=venues)
+```
+
+***
+
+## **Key Constraints for AI Code Generation**
+
+1. **ALWAYS use `.venv`** - Never execute Python outside virtual environment
+2. **Budget is DISABLED** - Do not reference `budget_service` or `trip_budget_service`
+3. **Database-only venues** - Itinerary MUST only use venues from Airflow DB
+4. **Exact activity counts** - Relaxed=2, Moderate=3, Packed=4 activities per day
+5. **Source citations required** - Every activity needs `from_database: true` and `source_url`
+6. **LLM fallback chain** - Groq → Gemini for all LLM operations
+7. **Fail-soft enrichments** - Weather/Maps failures don't block itinerary generation
+8. **Port 5435 for PostgreSQL** - Not the default 5432
+9. **Toronto fallback venues** - System works even without database access
+10. **No external venue invention** - If DB lacks venues, reduce activities per day
+
+***
+
+## **Summary: What Makes This Prompt Better**
+
+✅ **Accurate Architecture** - Reflects actual file structure and service dependencies  
+✅ **Virtual Environment Emphasis** - Clear instructions for `.venv` usage  
+✅ **Real Code Examples** - Extracted from actual source files  
+✅ **Database Schema** - Complete table definitions and query patterns  
+✅ **LLM Fallback Logic** - Groq → Gemini chain documented  
+✅ **Airflow Integration** - Clear explanation of data pipeline  
+✅ **Budget Removal** - Explicit deprecation of budget services  
+✅ **Testing Procedures** - Practical commands for verification  
+✅ **Error Handling** - Common issues and solutions  
+✅ **Complete Workflow** - End-to-end user journey with service interactions
+
+This prompt provides everything needed to understand, modify, and extend the MonVoyage codebase while ensuring all operations run correctly within the `.venv` environment.
