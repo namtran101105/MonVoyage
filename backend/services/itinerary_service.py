@@ -91,7 +91,6 @@ The schema is:
 {
   "itinerary": {
     "option_name": "<string>",
-    "total_cost": <number>,
     "activities_per_day_avg": <number>,
     "total_travel_time_hours": <number>,
     "days": [
@@ -111,7 +110,6 @@ The schema is:
             "time_end": "HH:MM",
             "venue_name": "<string>",
             "category": "<interest_category>",
-            "cost": <number>,
             "duration_reason": "<why this duration for this pace>",
             "notes": "<brief description>",
             "source_url": "<venue_url_from_database>",
@@ -123,7 +121,6 @@ The schema is:
             "meal_type": "lunch|dinner",
             "venue_name": "<string>",
             "time": "HH:MM",
-            "cost": <number>
           }
         ],
         "evening_return": {
@@ -133,8 +130,6 @@ The schema is:
           "travel_minutes": <int>,
           "mode": "<transport_mode>"
         },
-        "daily_budget_allocated": <number>,
-        "daily_budget_spent": <number>
       }
     ]
   }
