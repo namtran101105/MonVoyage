@@ -8,7 +8,7 @@ You need Docker Desktop installed and running, `docker compose` available, and y
 ## Getting Started
 1. Build Docker and start all services, run:
   ```bash
-    docker compose -f docker-compose.dev.yml up -d --build
+  docker compose -f docker-compose.dev.yml up -d --build
   ```
 2. Then verify containers are running:
    ```bash
