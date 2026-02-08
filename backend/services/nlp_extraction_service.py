@@ -1,11 +1,13 @@
 """
 NLP service for extracting structured trip preferences from natural language input.
-Uses Groq API to parse user messages and extract travel details.
+Uses Gemini API (primary) or Groq API (fallback) to parse user messages and extract travel details.
 """
 import json
 import os
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
+from clients.gemini_client import GeminiClient
 from clients.groq_client import GroqClient
 from models.trip_preferences import TripPreferences
 from config.settings import settings
@@ -14,9 +16,31 @@ from config.settings import settings
 class NLPExtractionService:
     """Service for extracting trip preferences from natural language."""
 
-    def __init__(self):
-        """Initialize the extraction service with Groq client."""
-        self.groq_client = GroqClient()
+    def __init__(self, use_gemini: bool = True):
+        """
+        Initialize the extraction service with Gemini (primary) or Groq (fallback) client.
+
+        Args:
+            use_gemini: If True, use Gemini API. If False, use Groq API.
+        """
+        self.use_gemini = use_gemini
+
+        try:
+            if use_gemini and settings.GEMINI_KEY:
+                self.gemini_client = GeminiClient()
+                self.groq_client = None
+                print("✅ Using Gemini API (Primary)")
+            else:
+                self.gemini_client = None
+                self.groq_client = GroqClient()
+                print("✅ Using Groq API (Fallback)")
+        except Exception as e:
+            # If Gemini fails, fallback to Groq
+            print(f"⚠️  Gemini initialization failed, using Groq fallback: {e}")
+            self.gemini_client = None
+            self.groq_client = GroqClient()
+            self.use_gemini = False
+
         self.system_instruction = self._build_system_instruction()
 
     def _build_system_instruction(self) -> str:
@@ -38,6 +62,8 @@ class NLPExtractionService:
           Only include categories the user actually mentions or implies. Return as an array of category names.
         - Pace of travel (relaxed, moderate, packed). Synonyms: relax/chill/slow/leisurely/easy → "relaxed", balanced/normal/steady → "moderate", fast/rush/busy/intense/active → "packed"
         - Location preference for drop-off or stay (e.g., "downtown", "near nature", "historic district")
+        - Booking type: "accommodation" (Airbnb only), "transportation" (flight/bus only), "both" (accommodation + transportation), or "none" (user doesn't want to book anything - if they say "no", "nothing", "I don't need", etc.)
+        - Source location: Where user is traveling from (only ask if booking_type is "transportation" or "both")
 
         Rules:
         1. Only extract information explicitly mentioned or strongly implied
@@ -50,7 +76,8 @@ class NLPExtractionService:
            - Duration: Extract number of days/weeks (e.g., "5 days" → duration_days: 5, "2 weeks" → duration_days: 14)
         4. For budget, extract a single value (if a range is given, use the midpoint or maximum)
         5. For interests, classify into the 5 categories listed above. Return only the matching category names, not the raw activities
-        6. Be conservative - better to leave something null than to guess incorrectly
+        6. For booking_type: If user responds with "no", "nothing", "I don't need", "no thanks", "I'll book myself", or any negative response → set booking_type to "none"
+        7. Be conservative - better to leave something null than to guess incorrectly
         7. Return valid JSON only, no additional text"""
 
     def _build_extraction_prompt(self, user_input: str) -> str:
@@ -73,7 +100,9 @@ class NLPExtractionService:
             "budget_currency": "string (default: CAD)",
             "interests": "array of strings — ONLY use these exact category names: 'Food and Beverage', 'Entertainment', 'Culture and History', 'Sport', 'Natural Place'",
             "pace": "string or null (relaxed/moderate/packed). Map synonyms: relax/chill/slow/easy → relaxed, fast/rush/busy/intense → packed",
-            "location_preference": "string or null (e.g., downtown, near nature, historic district)"
+            "location_preference": "string or null (e.g., downtown, near nature, historic district)",
+            "booking_type": "string or null ('accommodation', 'transportation', 'both', or 'none' if user says no/nothing/doesn't want to book)",
+            "source_location": "string or null (where user is traveling from - only needed if booking_type is 'transportation' or 'both')"
         }
 
         prompt = f"""Extract travel preferences from this user message:
@@ -88,6 +117,7 @@ class NLPExtractionService:
         - Use null for missing information
         - Return arrays as empty [] if no items are mentioned
         - Location: If user says "anywhere", "no preference", "flexible" → set location_preference to "flexible"
+        - Booking: If user says "no", "nothing", "I don't need", "no thanks" when asked about booking → set booking_type to "none"
         - Dates:
           * Specific dates → "YYYY-MM-DD" format
           * Month only → "YYYY-MM" or "Month YYYY" format
@@ -119,13 +149,34 @@ class NLPExtractionService:
         prompt = self._build_extraction_prompt(user_input)
 
         try:
-            # Call Groq API to extract preferences as JSON
-            extracted_data = self.groq_client.generate_json(
-                prompt=prompt,
-                system_instruction=self.system_instruction,
-                temperature=settings.EXTRACTION_TEMPERATURE,
-                max_tokens=settings.EXTRACTION_MAX_TOKENS
-            )
+            if self.use_gemini and self.gemini_client:
+                # Call Gemini API (async, so use asyncio.run to make it sync)
+                extracted_text = asyncio.run(
+                    self.gemini_client.generate_content(
+                        prompt=prompt,
+                        system_instruction=self.system_instruction,
+                        temperature=settings.GEMINI_EXTRACTION_TEMPERATURE,
+                        max_tokens=settings.GEMINI_EXTRACTION_MAX_TOKENS
+                    )
+                )
+
+                # Parse JSON from response
+                extracted_text = extracted_text.strip()
+                if extracted_text.startswith("```json"):
+                    extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
+                elif extracted_text.startswith("```"):
+                    extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
+
+                extracted_data = json.loads(extracted_text)
+
+            else:
+                # Call Groq API to extract preferences as JSON
+                extracted_data = self.groq_client.generate_json(
+                    prompt=prompt,
+                    system_instruction=self.system_instruction,
+                    temperature=settings.GROQ_TEMPERATURE,
+                    max_tokens=settings.GROQ_MAX_TOKENS
+                )
 
             # Create TripPreferences object
             preferences = TripPreferences(**extracted_data)
@@ -238,6 +289,15 @@ class NLPExtractionService:
         if not preferences.budget:
             missing_fields.append("budget")
 
+        # Priority 7: Booking type (ask after basic preferences, but allow 'none' as valid answer)
+        if not preferences.booking_type:
+            missing_fields.append("booking_type")
+
+        # Priority 8: Source location (only if needed for transportation)
+        # If booking_type is 'none', skip source location entirely
+        if preferences.booking_type in ["transportation", "both"] and not preferences.source_location:
+            missing_fields.append("source_location")
+
         missing_fields_str = ", ".join(missing_fields) if missing_fields else "None"
 
         # Check if all questions have been asked (no missing fields)
@@ -324,6 +384,10 @@ RULES:
                 next_field_to_ask = "pace (what pace do you prefer for your trip: relaxed, moderate, or packed?)"
             elif "budget" in missing_fields_str:
                 next_field_to_ask = "budget (what's your total or daily budget for this trip?)"
+            elif "booking_type" in missing_fields_str:
+                next_field_to_ask = "booking preferences (would you like to book: 1) Accommodation only (Airbnb), 2) Transportation only (flight/bus), 3) Both, or just say 'no' if you don't need booking assistance?)"
+            elif "source_location" in missing_fields_str:
+                next_field_to_ask = "source location (where will you be traveling from?)"
 
             prompt = f"""User just said: "{user_input}"
 
@@ -361,6 +425,34 @@ Response:"""
             fallback_message = "✅ I've updated your preferences! Check the panel on the right for details." if is_refinement else "✅ I've extracted your preferences! Check the panel on the right for details."
             return fallback_message, all_questions_asked
 
+    def _get_next_missing_field(self, preferences: TripPreferences) -> Optional[str]:
+        """
+        Determine which field the bot is currently asking for, based on
+        the same priority order used in generate_conversational_response.
+
+        Returns:
+            The name of the next missing field, or None if all complete.
+        """
+        if not preferences.city:
+            return "city"
+        if not preferences.country:
+            return "country"
+        if not preferences.location_preference:
+            return "location_preference"
+        if not preferences.start_date and not preferences.end_date and not preferences.duration_days:
+            return "dates"
+        if not preferences.interests or len(preferences.interests) == 0:
+            return "interests"
+        if not preferences.pace:
+            return "pace"
+        if not preferences.budget:
+            return "budget"
+        if not preferences.booking_type:
+            return "booking_type"
+        if preferences.booking_type in ["transportation", "both"] and not preferences.source_location:
+            return "source_location"
+        return None
+
     def refine_preferences(
         self,
         existing_preferences: TripPreferences,
@@ -376,6 +468,65 @@ Response:"""
         Returns:
             Updated TripPreferences object
         """
+        # Determine what field was just asked
+        currently_asking = self._get_next_missing_field(existing_preferences)
+        print(f"[refine] Currently asking for: {currently_asking}")
+        print(f"[refine] User replied: {additional_input}")
+
+        # ── Deterministic handling for fields the LLM often gets wrong ──
+        # If we know exactly which field is being asked, handle simple
+        # answers directly so the LLM can't misinterpret them.
+
+        user_lower = additional_input.strip().lower()
+
+        # Handle source_location: any answer goes into source_location, NOT city
+        if currently_asking == "source_location":
+            import copy
+            updated = copy.deepcopy(existing_preferences)
+            updated.source_location = additional_input.strip()
+            updated = self._calculate_date_fields(updated)
+            print(f"[refine] Deterministic: set source_location = {updated.source_location}")
+            return updated
+
+        # Handle booking_type: detect common responses deterministically
+        if currently_asking == "booking_type":
+            booking_map = None
+            neg_words = ["no", "nothing", "none", "nah", "nope", "don't", "dont",
+                         "no thanks", "no thank", "not needed", "i'll book",
+                         "ill book", "book myself", "skip"]
+            accom_words = ["accommodation", "airbnb", "hotel", "place to stay",
+                           "lodging", "stay", "hostel", "accom"]
+            trans_words = ["transportation", "flight", "flights", "bus", "train",
+                           "plane", "ticket", "tickets", "transport"]
+            both_words = ["both", "everything", "all"]
+
+            if any(w in user_lower for w in both_words):
+                booking_map = "both"
+            elif any(w in user_lower for w in neg_words):
+                booking_map = "none"
+            elif any(w in user_lower for w in accom_words) and any(w in user_lower for w in trans_words):
+                booking_map = "both"
+            elif any(w in user_lower for w in accom_words):
+                booking_map = "accommodation"
+            elif any(w in user_lower for w in trans_words):
+                booking_map = "transportation"
+
+            if booking_map:
+                import copy
+                updated = copy.deepcopy(existing_preferences)
+                updated.booking_type = booking_map
+                updated = self._calculate_date_fields(updated)
+                print(f"[refine] Deterministic: set booking_type = {booking_map}")
+                return updated
+
+        # ── General case: use the LLM with context about which field is being asked ──
+        context_hint = ""
+        if currently_asking:
+            context_hint = f"""\n\nIMPORTANT CONTEXT: The bot just asked the user for their \"{currently_asking}\".
+The user's reply \"{additional_input}\" is answering THAT question.
+Do NOT change other fields (especially city, country) based on this answer.
+Set the \"{currently_asking}\" field with the user's answer."""
+
         # Build a prompt that includes existing preferences
         prompt = f"""You have previously extracted these preferences from a user:
 
@@ -383,19 +534,24 @@ Response:"""
 
 The user has now provided additional information:
 "{additional_input}"
+{context_hint}
 
 CRITICAL INSTRUCTIONS:
 1. PRESERVE ALL EXISTING VALUES that are not explicitly updated by the new information
 2. If the user provides ONLY a country, keep the existing city value - do NOT set city to null
 3. If the user provides ONLY a city, keep the existing country value - do NOT set country to null
 4. If the user says "anywhere", "no preference", "flexible", "anywhere is fine", "anywhere is okay" for location → set location_preference to "flexible"
-5. Only update fields that are explicitly mentioned or clearly implied in the new input
-6. NEVER remove or null out existing values unless the new information directly contradicts them
+5. If the user says "no", "nothing", "I don't need", "no thanks", "I'll book myself" when asked about booking → set booking_type to "none"
+6. Only update fields that are explicitly mentioned or clearly implied in the new input
+7. NEVER remove or null out existing values unless the new information directly contradicts them
+8. The bot was asking for \"{currently_asking}\" — the user's reply should fill THAT field
 
 Examples:
 - Existing: {{"city": "Kingston", "country": null}}, New: "Canada" → Result: {{"city": "Kingston", "country": "Canada"}}
 - Existing: {{"city": null, "country": "France"}}, New: "Paris" → Result: {{"city": "Paris", "country": "France"}}
 - Existing: {{"city": "Tokyo", "country": "Japan"}}, New: "anywhere is okay" → Result: {{"location_preference": "flexible"}}, keep city and country
+- Existing: {{"booking_type": null}}, New: "no" or "nothing" or "I don't need" → Result: {{"booking_type": "none"}}
+- Existing: {{"city": "Toronto", "booking_type": "both", "source_location": null}}, New: "Montreal" → Result: keep city as "Toronto", set source_location to "Montreal"
 
 Return the complete updated JSON object with the same structure:"""
 
@@ -519,12 +675,19 @@ Return the complete updated JSON object with the same structure:"""
             Completeness score between 0.0 and 1.0
         """
         # Required fields (location_preference is optional - useful for layovers/transits but not always needed)
+        # source_location is conditionally required based on booking_type
         required_fields = [
             'city', 'country',
             'start_date', 'end_date', 'duration_days',
             'budget',
-            'interests', 'pace'
+            'interests', 'pace',
+            'booking_type'
         ]
+        
+        # Add source_location as required if booking includes transportation
+        # If booking_type is 'none', source_location is NOT required
+        if preferences.booking_type in ["transportation", "both"]:
+            required_fields.append('source_location')
 
         filled_count = 0
         for field in required_fields:
